@@ -6,6 +6,7 @@ require "optparse"
 require "shellwords"
 require "English"
 require_relative "../lib/icon_search"
+require_relative "../lib/kokoro_tts"
 require_relative "../lib/openai_whisper"
 
 class FFmpegVideoBuilder
@@ -345,6 +346,9 @@ options = {
   icon_license_type: IconSearch::DEFAULT_LICENSE_TYPE,
   icon_size: IconSearch::DEFAULT_SIZE,
   icon_limit: IconSearch::DEFAULT_LIMIT,
+  kokoro_voice: KokoroTTS::DEFAULT_VOICE,
+  kokoro_speed: KokoroTTS::DEFAULT_SPEED,
+  kokoro_lang_code: KokoroTTS::DEFAULT_LANG_CODE,
   whisper_model: OpenAIWhisper::DEFAULT_MODEL,
   whisper_output_format: OpenAIWhisper::DEFAULT_OUTPUT_FORMAT,
   whisper_task: OpenAIWhisper::DEFAULT_TASK,
@@ -372,6 +376,21 @@ parser = OptionParser.new do |opts|
   end
   opts.on("--icon-limit COUNT", Integer, "Maximum icon search results, default: #{IconSearch::DEFAULT_LIMIT}") do |limit|
     options[:icon_limit] = limit
+  end
+  opts.on("--kokoro-speak TEXT", "Generate narration audio with local Kokoro text") do |text|
+    options[:kokoro_text] = text
+  end
+  opts.on("--kokoro-script FILE", "Generate narration audio with local Kokoro from a text file") do |file|
+    options[:kokoro_text_file] = file
+  end
+  opts.on("--kokoro-voice VOICE", "Kokoro voice, default: #{KokoroTTS::DEFAULT_VOICE}") do |voice|
+    options[:kokoro_voice] = voice
+  end
+  opts.on("--kokoro-speed SPEED", Float, "Kokoro speed, default: #{KokoroTTS::DEFAULT_SPEED}") do |speed|
+    options[:kokoro_speed] = speed
+  end
+  opts.on("--kokoro-lang-code CODE", "Kokoro language code, default: #{KokoroTTS::DEFAULT_LANG_CODE}") do |lang_code|
+    options[:kokoro_lang_code] = lang_code
   end
   opts.on("--whisper-transcribe AUDIO_FILE", "Transcribe an audio file with OpenAI Whisper") do |file|
     options[:whisper_audio_file] = file
@@ -413,6 +432,18 @@ begin
       limit: options.fetch(:icon_limit)
     )
     puts JSON.pretty_generate(batch.to_h)
+    exit 0
+  end
+
+  if options[:kokoro_text] || options[:kokoro_text_file]
+    narration = KokoroTTS.speak(
+      text: options[:kokoro_text],
+      text_file: options[:kokoro_text_file],
+      voice: options.fetch(:kokoro_voice),
+      speed: options.fetch(:kokoro_speed),
+      lang_code: options.fetch(:kokoro_lang_code)
+    )
+    puts JSON.pretty_generate(narration.to_h)
     exit 0
   end
 

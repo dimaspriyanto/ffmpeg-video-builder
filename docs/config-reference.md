@@ -98,6 +98,27 @@ Supported `license_type` values:
 - `attribution` - attribution/share-alike sources, such as CC BY-SA 4.0
 - `any` - allow any supported source license type
 
+## Local Kokoro narration
+
+The script can call the local Kokoro helper at `bin/kokoro-tts` to generate
+narration audio. Kokoro installation is intentionally not handled by this
+bundle.
+
+Outputs are written into `downloads/projects_RANDOM_ID/`, including
+`voiceover.wav` and `kokoro.json`.
+
+| CLI option | Type | Default |
+|---|---:|---:|
+| `--kokoro-speak` | string | direct text input |
+| `--kokoro-script` | string | text file input |
+| `--kokoro-voice` | string | `af_heart` |
+| `--kokoro-speed` | number | `1.0` |
+| `--kokoro-lang-code` | string | `a` |
+
+If Kokoro is installed in a virtualenv, set `KOKORO_PYTHON` to the full path of
+that Python executable. Set `KOKORO_SCRIPT` only if you move the helper script
+away from `bin/kokoro-tts`.
+
 ## Local Whisper sentence timing
 
 The script can call the local `openai/whisper` CLI to derive sentence start/end

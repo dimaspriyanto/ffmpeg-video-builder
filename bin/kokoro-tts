@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import sys
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate narration audio with local Kokoro.")
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--text", help="Text to synthesize.")
+    input_group.add_argument("--text-file", help="Path to a UTF-8 text file to synthesize.")
+    parser.add_argument("--output", required=True, help="Output WAV file path.")
+    parser.add_argument("--voice", default="af_heart", help="Kokoro voice name.")
+    parser.add_argument("--speed", type=float, default=1.0, help="Speech speed multiplier.")
+    parser.add_argument("--lang-code", default="a", help="Kokoro language code. Default: a (American English).")
+    parser.add_argument("--sample-rate", type=int, default=24000, help="Output sample rate.")
+    parser.add_argument("--split-pattern", default=r"\n+", help="Text split pattern passed to Kokoro.")
+    return parser.parse_args()
+
+
+def read_text(args):
+    if args.text is not None:
+        text = args.text
+    else:
+        with open(args.text_file, "r", encoding="utf-8") as file:
+            text = file.read()
+
+    text = text.strip()
+    if not text:
+        raise ValueError("Text is empty.")
+    return text
+
+
+def main():
+    args = parse_args()
+    text = read_text(args)
+
+    import numpy as np
+    import soundfile as sf
+    from kokoro import KPipeline
+
+    output_dir = os.path.dirname(os.path.abspath(args.output))
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    pipeline = KPipeline(lang_code=args.lang_code)
+    generator = pipeline(
+        text,
+        voice=args.voice,
+        speed=args.speed,
+        split_pattern=args.split_pattern,
+    )
+
+    audio_chunks = []
+    for index, (graphemes, _phonemes, audio) in enumerate(generator):
+        print(f"Chunk {index}: {graphemes}")
+        audio_chunks.append(audio)
+
+    if not audio_chunks:
+        raise RuntimeError("Kokoro did not generate any audio chunks.")
+
+    final_audio = np.concatenate(audio_chunks)
+    sf.write(args.output, final_audio, args.sample_rate)
+    print(f"Done. Saved {args.output}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)

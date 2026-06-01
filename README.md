@@ -27,6 +27,7 @@ It is designed for icon-based videos, captions, simple transitions, voiceovers, 
 
 - Ruby 3.0+
 - FFmpeg installed and available in your terminal PATH
+- Optional: local Kokoro Python environment for narration audio generation
 - Optional: local `openai/whisper` CLI for audio transcription
 
 Check FFmpeg:
@@ -43,6 +44,10 @@ whisper --help
 
 If Whisper is installed but not on `PATH`, set `WHISPER_COMMAND` to the full
 path of the executable.
+
+Kokoro installation is intentionally not handled by this bundle. The local
+helper script lives at `bin/kokoro-tts`; set `KOKORO_PYTHON` if Kokoro is
+installed in a specific Python or virtualenv.
 
 ## Usage
 
@@ -73,6 +78,15 @@ downloads/projects_RANDOM_ID/
 
 The command also writes `icons.json` in that directory with the selected icon
 IDs, licenses, source URLs, and local file paths.
+
+Generate narration audio with local Kokoro:
+
+```bash
+bin/ffmpeg_video_builder --kokoro-script script.txt
+```
+
+Kokoro audio is written into a new `downloads/projects_RANDOM_ID/` directory as
+`voiceover.wav`.
 
 Create sentence timings and subtitles from audio with local Whisper:
 
@@ -147,6 +161,32 @@ Add an audio file:
 ```
 
 The final output will end at the configured duration or audio/video duration, whichever is shorter.
+
+### Kokoro narration
+
+The script can call the local Kokoro helper at `bin/kokoro-tts`:
+
+```bash
+bin/ffmpeg_video_builder --kokoro-script script.txt
+```
+
+You can also pass short text directly:
+
+```bash
+bin/ffmpeg_video_builder --kokoro-speak "A short narration line."
+```
+
+Optional flags:
+
+- `--kokoro-voice` - Kokoro voice, default `af_heart`
+- `--kokoro-speed` - speech speed, default `1.0`
+- `--kokoro-lang-code` - Kokoro language code, default `a`
+
+If Kokoro is installed in a virtualenv, set:
+
+```bash
+KOKORO_PYTHON=/full/path/to/python bin/ffmpeg_video_builder --kokoro-script script.txt
+```
 
 ### Whisper sentence timing
 
