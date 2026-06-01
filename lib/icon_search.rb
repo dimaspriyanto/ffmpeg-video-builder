@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 require "json"
+require "fileutils"
 require "net/http"
+require "securerandom"
 require "uri"
 
 module IconSearch
@@ -59,11 +61,11 @@ module IconSearch
     :license_type,
     :style,
     :svg_url,
-    :png_url,
+    :downloaded_file,
     keyword_init: true
   ) do
     def to_h
-      {
+      payload = {
         id: id,
         name: name,
         source: source,
@@ -71,8 +73,18 @@ module IconSearch
         license: license,
         license_type: license_type,
         style: style,
-        svg_url: svg_url,
-        png_url: png_url
+        svg_url: svg_url
+      }
+      payload[:downloaded_file] = downloaded_file if downloaded_file
+      payload
+    end
+  end
+
+  DownloadBatch = Struct.new(:download_dir, :results, keyword_init: true) do
+    def to_h
+      {
+        download_dir: download_dir,
+        results: results.map(&:to_h)
       }
     end
   end
@@ -85,6 +97,18 @@ module IconSearch
       license_type: license_type,
       size: size,
       limit: limit
+    )
+  end
+
+  def self.search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads")
+    Client.new.search_and_download(
+      keyword: keyword,
+      style: style,
+      source: source,
+      license_type: license_type,
+      size: size,
+      limit: limit,
+      downloads_root: downloads_root
     )
   end
 
@@ -105,6 +129,26 @@ module IconSearch
       ranked_icons(icons, keyword, style_tokens).first(limit).map do |icon_id|
         build_result(icon_id, source, style, size)
       end
+    end
+
+    def search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads")
+      results = search(
+        keyword: keyword,
+        style: style,
+        source: source,
+        license_type: license_type,
+        size: size,
+        limit: limit
+      )
+      download_dir = create_download_dir(downloads_root)
+
+      results.each do |result|
+        result.downloaded_file = download_icon(result, download_dir)
+      end
+
+      batch = DownloadBatch.new(download_dir: download_dir, results: results)
+      write_metadata(batch)
+      batch
     end
 
     private
@@ -191,6 +235,17 @@ module IconSearch
       raise "Iconify returned invalid JSON: #{e.message}"
     end
 
+    def fetch_binary(uri)
+      response = Net::HTTP.get_response(uri)
+      unless response.is_a?(Net::HTTPSuccess)
+        raise "Iconify download failed with HTTP #{response.code}: #{response.message}"
+      end
+
+      response.body
+    rescue SocketError, SystemCallError => e
+      raise "Iconify download request failed: #{e.message}"
+    end
+
     def ranked_icons(icon_ids, keyword, style_tokens)
       tokens = keyword.downcase.split(/\s+/)
 
@@ -227,8 +282,7 @@ module IconSearch
         license: source_metadata.fetch(:license),
         license_type: source_metadata.fetch(:license_type),
         style: style.to_s.empty? ? DEFAULT_STYLE : style,
-        svg_url: asset_url(icon_id, "svg", size),
-        png_url: asset_url(icon_id, "png", size)
+        svg_url: asset_url(icon_id, "svg", size)
       )
     end
 
@@ -241,6 +295,30 @@ module IconSearch
       uri = URI("#{API_BASE}/#{prefix}/#{name}.#{format}")
       uri.query = URI.encode_www_form(width: size, height: size)
       uri.to_s
+    end
+
+    def create_download_dir(downloads_root)
+      root = File.expand_path(downloads_root)
+      dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
+      FileUtils.mkdir_p(dir)
+      dir
+    end
+
+    def download_icon(result, download_dir)
+      file = File.join(download_dir, "#{safe_filename(result.id)}.svg")
+      File.binwrite(file, fetch_binary(URI(result.svg_url)))
+      file
+    end
+
+    def write_metadata(batch)
+      File.write(
+        File.join(batch.download_dir, "icons.json"),
+        "#{JSON.pretty_generate(batch.to_h)}\n"
+      )
+    end
+
+    def safe_filename(value)
+      value.to_s.gsub(/[^a-zA-Z0-9._-]+/, "_")
     end
   end
 end

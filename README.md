@@ -55,6 +55,15 @@ Search icons:
 bin/ffmpeg_video_builder --icon-search "light bulb"
 ```
 
+Icon searches download SVG assets into a new directory:
+
+```text
+downloads/projects_RANDOM_ID/
+```
+
+The command also writes `icons.json` in that directory with the selected icon
+IDs, licenses, source URLs, and local file paths.
+
 The example will generate:
 
 ```bash
@@ -209,6 +218,9 @@ Default icon search parameters:
 - `source` - `fluent`
 - `license_type` - `permissive`
 - `size` - `512`
+
+The search command downloads the returned results as SVG files. Use
+`--icon-limit 1` to download only the top match.
 
 Supported `style` preferences include `bold`, `filled`, `regular`, `light`,
 `outline`, `rounded`, and `sharp`.

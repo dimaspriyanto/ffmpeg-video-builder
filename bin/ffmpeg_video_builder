@@ -378,7 +378,7 @@ parser.parse!
 
 begin
   if options[:icon_search_keyword]
-    results = IconSearch.search(
+    batch = IconSearch.search_and_download(
       keyword: options.fetch(:icon_search_keyword),
       style: options.fetch(:icon_style),
       source: options.fetch(:icon_source),
@@ -386,7 +386,7 @@ begin
       size: options.fetch(:icon_size),
       limit: options.fetch(:icon_limit)
     )
-    puts JSON.pretty_generate(results.map(&:to_h))
+    puts JSON.pretty_generate(batch.to_h)
     exit 0
   end
 

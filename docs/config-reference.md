@@ -83,6 +83,10 @@ Icon search parameters:
 | `license_type` | string | `permissive` |
 | `size` | integer | `512` |
 
+Icon searches download SVG assets into `downloads/projects_RANDOM_ID/` and write
+`icons.json` in the same directory with selected icon IDs, licenses, source
+URLs, and local file paths.
+
 Supported `style` preferences include `bold`, `filled`, `regular`, `light`,
 `outline`, `rounded`, and `sharp`. The `bold` preference also matches `filled`
 icons because Fluent UI System Icons uses filled variants instead of a bold
