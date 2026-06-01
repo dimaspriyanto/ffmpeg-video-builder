@@ -98,6 +98,29 @@ Supported `license_type` values:
 - `attribution` - attribution/share-alike sources, such as CC BY-SA 4.0
 - `any` - allow any supported source license type
 
+## Local Whisper sentence timing
+
+The script can call the local `openai/whisper` CLI to derive sentence start/end
+times from an existing audio file. Whisper does not create audio from a text
+script; create or record audio first, then run Whisper to produce subtitle
+timings.
+
+Outputs are written into `downloads/projects_RANDOM_ID/`, including
+`sentences.json` and `sentences.srt`.
+
+| CLI option | Type | Default |
+|---|---:|---:|
+| `--whisper-transcribe` | string | required audio file |
+| `--whisper-model` | string | `turbo` |
+| `--whisper-output-format` | string | `json` |
+| `--whisper-task` | string | `transcribe` |
+| `--whisper-word-timestamps` | boolean | enabled |
+| `--whisper-language` | string | none |
+| `--whisper-prompt` | string | none |
+
+If `whisper` is not on `PATH`, set `WHISPER_COMMAND` to the full path of the
+local executable.
+
 Animations:
 
 - `none`

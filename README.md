@@ -27,12 +27,22 @@ It is designed for icon-based videos, captions, simple transitions, voiceovers, 
 
 - Ruby 3.0+
 - FFmpeg installed and available in your terminal PATH
+- Optional: local `openai/whisper` CLI for audio transcription
 
 Check FFmpeg:
 
 ```bash
 ffmpeg -version
 ```
+
+Check local Whisper:
+
+```bash
+whisper --help
+```
+
+If Whisper is installed but not on `PATH`, set `WHISPER_COMMAND` to the full
+path of the executable.
 
 ## Usage
 
@@ -63,6 +73,20 @@ downloads/projects_RANDOM_ID/
 
 The command also writes `icons.json` in that directory with the selected icon
 IDs, licenses, source URLs, and local file paths.
+
+Create sentence timings and subtitles from audio with local Whisper:
+
+```bash
+bin/ffmpeg_video_builder --whisper-transcribe voiceover.mp3
+```
+
+Whisper analyzes an existing audio file. It does not create audio from a text
+script; use a TTS tool or recorded voice first, then run Whisper to produce
+sentence timestamps and subtitles.
+
+Outputs are written into a new `downloads/projects_RANDOM_ID/` directory. The
+default local Whisper model is `turbo`, the default output format is `json`, and
+word timestamps are enabled so the script can derive sentence-level timing.
 
 The example will generate:
 
@@ -123,6 +147,35 @@ Add an audio file:
 ```
 
 The final output will end at the configured duration or audio/video duration, whichever is shorter.
+
+### Whisper sentence timing
+
+The script can call the local `openai/whisper` CLI to derive sentence start/end
+times from an audio file:
+
+```bash
+bin/ffmpeg_video_builder --whisper-transcribe voiceover.mp3
+```
+
+This creates Whisper's JSON output plus:
+
+- `sentences.json` - sentence text with `start` and `end` seconds
+- `sentences.srt` - subtitle file using the same sentence timings
+
+Optional flags:
+
+- `--whisper-model` - local Whisper model, default `turbo`
+- `--whisper-output-format` - `txt`, `vtt`, `srt`, `tsv`, `json`, or `all`; default `json`
+- `--whisper-task` - `transcribe` or `translate`; default `transcribe`
+- `--no-whisper-word-timestamps` - disable word timestamps and use segment timing fallback
+- `--whisper-language` - optional language hint
+- `--whisper-prompt` - optional initial prompt
+
+If the `whisper` executable is not on `PATH`, set:
+
+```bash
+WHISPER_COMMAND=/full/path/to/whisper bin/ffmpeg_video_builder --whisper-transcribe voiceover.mp3
+```
 
 ## Background options
 

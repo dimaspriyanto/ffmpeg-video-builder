@@ -6,6 +6,7 @@ require "optparse"
 require "shellwords"
 require "English"
 require_relative "../lib/icon_search"
+require_relative "../lib/openai_whisper"
 
 class FFmpegVideoBuilder
   DEFAULTS = {
@@ -343,7 +344,11 @@ options = {
   icon_source: IconSearch::DEFAULT_SOURCE,
   icon_license_type: IconSearch::DEFAULT_LICENSE_TYPE,
   icon_size: IconSearch::DEFAULT_SIZE,
-  icon_limit: IconSearch::DEFAULT_LIMIT
+  icon_limit: IconSearch::DEFAULT_LIMIT,
+  whisper_model: OpenAIWhisper::DEFAULT_MODEL,
+  whisper_output_format: OpenAIWhisper::DEFAULT_OUTPUT_FORMAT,
+  whisper_task: OpenAIWhisper::DEFAULT_TASK,
+  whisper_word_timestamps: OpenAIWhisper::DEFAULT_WORD_TIMESTAMPS
 }
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: ffmpeg_video_builder [options] path/to/project.json"
@@ -368,6 +373,27 @@ parser = OptionParser.new do |opts|
   opts.on("--icon-limit COUNT", Integer, "Maximum icon search results, default: #{IconSearch::DEFAULT_LIMIT}") do |limit|
     options[:icon_limit] = limit
   end
+  opts.on("--whisper-transcribe AUDIO_FILE", "Transcribe an audio file with OpenAI Whisper") do |file|
+    options[:whisper_audio_file] = file
+  end
+  opts.on("--whisper-model MODEL", "Local Whisper model, default: #{OpenAIWhisper::DEFAULT_MODEL}") do |model|
+    options[:whisper_model] = model
+  end
+  opts.on("--whisper-output-format FORMAT", "Whisper output format, default: #{OpenAIWhisper::DEFAULT_OUTPUT_FORMAT}") do |format|
+    options[:whisper_output_format] = format
+  end
+  opts.on("--whisper-task TASK", "Whisper task, default: #{OpenAIWhisper::DEFAULT_TASK}") do |task|
+    options[:whisper_task] = task
+  end
+  opts.on("--[no-]whisper-word-timestamps", "Enable word timestamps for sentence timing, default: enabled") do |word_timestamps|
+    options[:whisper_word_timestamps] = word_timestamps
+  end
+  opts.on("--whisper-language LANGUAGE", "Optional input language hint, such as en or id") do |language|
+    options[:whisper_language] = language
+  end
+  opts.on("--whisper-prompt PROMPT", "Optional prompt to guide transcription style or vocabulary") do |prompt|
+    options[:whisper_prompt] = prompt
+  end
   opts.on("-h", "--help", "Show help") do
     puts opts
     exit 0
@@ -387,6 +413,20 @@ begin
       limit: options.fetch(:icon_limit)
     )
     puts JSON.pretty_generate(batch.to_h)
+    exit 0
+  end
+
+  if options[:whisper_audio_file]
+    transcription = OpenAIWhisper.transcribe(
+      file: options.fetch(:whisper_audio_file),
+      model: options.fetch(:whisper_model),
+      output_format: options.fetch(:whisper_output_format),
+      task: options.fetch(:whisper_task),
+      word_timestamps: options.fetch(:whisper_word_timestamps),
+      language: options[:whisper_language],
+      prompt: options[:whisper_prompt]
+    )
+    puts JSON.pretty_generate(transcription.to_h)
     exit 0
   end
 
