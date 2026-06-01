@@ -1,0 +1,97 @@
+{
+  "output": "output.mp4",
+  "width": 1080,
+  "height": 1920,
+  "fps": 30,
+  "duration": 9,
+  "background": {
+    "type": "color",
+    "color": "#111827"
+  },
+  "elements": [
+    {
+      "type": "rectangle",
+      "start": 0,
+      "end": 9,
+      "x": 70,
+      "y": 250,
+      "width": 940,
+      "height": 1180,
+      "color": "white@0.08"
+    },
+    {
+      "type": "text",
+      "text": "Small habits decide your money future",
+      "start": 0.2,
+      "end": 3.2,
+      "font_size": 62,
+      "color": "white",
+      "x": "center",
+      "y": 260,
+      "box": true,
+      "box_color": "black@0.25"
+    },
+    {
+      "type": "image",
+      "file": "assets/brain.png",
+      "start": 0.5,
+      "end": 3.4,
+      "width": 300,
+      "x": "center",
+      "y": 600,
+      "animation": "pop"
+    },
+    {
+      "type": "text",
+      "text": "Your brain wants comfort now.",
+      "start": 0.8,
+      "end": 3.5,
+      "font_size": 50,
+      "color": "white",
+      "x": "center",
+      "y": 980
+    },
+    {
+      "type": "image",
+      "file": "assets/money.png",
+      "start": 3.5,
+      "end": 6.3,
+      "width": 300,
+      "x": "center",
+      "y": 600,
+      "animation": "slide_left"
+    },
+    {
+      "type": "text",
+      "text": "But your future needs consistency.",
+      "start": 3.7,
+      "end": 6.5,
+      "font_size": 50,
+      "color": "white",
+      "x": "center",
+      "y": 980
+    },
+    {
+      "type": "image",
+      "file": "assets/idea.png",
+      "start": 6.4,
+      "end": 8.8,
+      "width": 300,
+      "x": "center",
+      "y": 600,
+      "animation": "slide_up"
+    },
+    {
+      "type": "text",
+      "text": "Start with one tiny rule today.",
+      "start": 6.6,
+      "end": 8.9,
+      "font_size": 54,
+      "color": "white",
+      "x": "center",
+      "y": 980,
+      "box": true,
+      "box_color": "black@0.25"
+    }
+  ]
+}

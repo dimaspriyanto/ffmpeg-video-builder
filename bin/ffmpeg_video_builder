@@ -1,0 +1,364 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "optparse"
+require "shellwords"
+require "English"
+
+class FFmpegVideoBuilder
+  DEFAULTS = {
+    "output" => "output.mp4",
+    "width" => 1080,
+    "height" => 1920,
+    "fps" => 30,
+    "duration" => 10,
+    "background" => { "type" => "color", "color" => "black" },
+    "elements" => []
+  }.freeze
+
+  def self.call(config_path:, dry_run: false)
+    config = JSON.parse(File.read(config_path))
+    new(config, base_dir: File.dirname(File.expand_path(config_path)), dry_run: dry_run).build!
+  end
+
+  def initialize(config, base_dir:, dry_run: false)
+    @config = deep_merge(DEFAULTS, config)
+    @base_dir = base_dir
+    @dry_run = dry_run
+    @width = integer(@config.fetch("width"))
+    @height = integer(@config.fetch("height"))
+    @fps = integer(@config.fetch("fps"))
+    @duration = number(@config.fetch("duration"))
+    @input_args = []
+    @filters = []
+    @current_video_label = "base"
+    @input_index = 0
+  end
+
+  def build!
+    validate_ffmpeg! unless @dry_run
+    add_background_input
+    add_elements
+    command = build_output_command
+
+    puts Shellwords.join(command)
+    return command if @dry_run
+
+    system(*command) || raise("FFmpeg failed with status #{$CHILD_STATUS || 'unknown'}")
+  end
+
+  private
+
+  def validate_ffmpeg!
+    return if system("ffmpeg", "-version", out: File::NULL, err: File::NULL)
+
+    raise "FFmpeg is not installed or not available in PATH. Install it first, then retry."
+  end
+
+  def add_background_input
+    bg = @config.fetch("background")
+
+    case bg.fetch("type", "color")
+    when "color"
+      color = bg.fetch("color", "black")
+      @input_args += [
+        "-f", "lavfi",
+        "-i", "color=c=#{color}:s=#{@width}x#{@height}:d=#{@duration}:r=#{@fps}"
+      ]
+      @filters << "[0:v]format=yuv420p[base]"
+      @input_index = 1
+    when "image"
+      file = resolve_file!(bg.fetch("file"))
+      @input_args += ["-loop", "1", "-t", @duration.to_s, "-i", file]
+      @filters << "[0:v]scale=#{@width}:#{@height}:force_original_aspect_ratio=increase,crop=#{@width}:#{@height},format=yuv420p[base]"
+      @input_index = 1
+    when "video"
+      file = resolve_file!(bg.fetch("file"))
+      @input_args += ["-stream_loop", "-1", "-i", file]
+      @filters << "[0:v]scale=#{@width}:#{@height}:force_original_aspect_ratio=increase,crop=#{@width}:#{@height},trim=duration=#{@duration},setpts=PTS-STARTPTS,format=yuv420p[base]"
+      @input_index = 1
+    else
+      raise ArgumentError, "Unsupported background type: #{bg['type']}"
+    end
+  end
+
+  def add_elements
+    @config.fetch("elements", []).each_with_index do |element, index|
+      case element.fetch("type")
+      when "image", "icon"
+        add_image_element(element, index)
+      when "text"
+        add_text_element(element, index)
+      when "rectangle"
+        add_rectangle_element(element, index)
+      else
+        warn "Skipping unsupported element type: #{element['type']}"
+      end
+    end
+  end
+
+  def add_image_element(element, index)
+    file = resolve_file!(element.fetch("file"))
+    start_time = number(element.fetch("start", 0))
+    end_time = number(element.fetch("end", @duration))
+    width = integer(element.fetch("width", 300))
+    opacity = number(element.fetch("opacity", 1.0))
+    animation = element.fetch("animation", "fade")
+
+    input_label = "img#{index}"
+    output_label = "v#{index}"
+
+    @input_args += ["-loop", "1", "-t", @duration.to_s, "-i", file]
+
+    filter = "[#{@input_index}:v]scale=#{width}:-1,format=rgba"
+    filter += ",colorchannelmixer=aa=#{opacity}" if opacity < 1.0
+    filter += image_fade_filter(animation, start_time, end_time)
+    filter += "[#{input_label}]"
+    @filters << filter
+
+    x = overlay_x(element.fetch("x", "center"), animation, start_time)
+    y = overlay_y(element.fetch("y", "center"), animation, start_time)
+
+    @filters << "[#{@current_video_label}][#{input_label}]overlay=x='#{x}':y='#{y}':enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
+    @current_video_label = output_label
+    @input_index += 1
+  end
+
+  def add_text_element(element, index)
+    start_time = number(element.fetch("start", 0))
+    end_time = number(element.fetch("end", @duration))
+    text = escape_drawtext(element.fetch("text"))
+    font_size = integer(element.fetch("font_size", 54))
+    color = element.fetch("color", "white")
+    output_label = "vtext#{index}"
+    x = drawtext_x(element.fetch("x", "center"))
+    y = drawtext_y(element.fetch("y", @height - 260))
+    font_file = element["font_file"] || @config["font_file"]
+
+    drawtext = "[#{@current_video_label}]drawtext="
+    drawtext += "fontfile='#{escape_filter_path(resolve_optional_file(font_file))}':" if font_file && !font_file.empty?
+    drawtext += "text='#{text}':fontsize=#{font_size}:fontcolor=#{color}:x=#{x}:y=#{y}:"
+
+    if element.fetch("box", false)
+      box_color = element.fetch("box_color", "black@0.45")
+      border = integer(element.fetch("box_border", 28))
+      drawtext += "box=1:boxcolor=#{box_color}:boxborderw=#{border}:"
+    end
+
+    drawtext += "enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
+    @filters << drawtext
+    @current_video_label = output_label
+  end
+
+  def add_rectangle_element(element, index)
+    start_time = number(element.fetch("start", 0))
+    end_time = number(element.fetch("end", @duration))
+    x = element.fetch("x", 0)
+    y = element.fetch("y", 0)
+    width = element.fetch("width", @width)
+    height = element.fetch("height", 200)
+    color = element.fetch("color", "black@0.35")
+    output_label = "vrect#{index}"
+
+    @filters << "[#{@current_video_label}]drawbox=x=#{x}:y=#{y}:w=#{width}:h=#{height}:color=#{color}:t=fill:enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
+    @current_video_label = output_label
+  end
+
+  def build_output_command
+    audio_file = resolve_optional_file(@config["audio"])
+    output = resolve_output(@config.fetch("output"))
+
+    if audio_file && !audio_file.empty?
+      @input_args += ["-i", audio_file]
+      audio_index = @input_index
+      @input_index += 1
+
+      [
+        "ffmpeg", "-y",
+        *@input_args,
+        "-filter_complex", @filters.join(";"),
+        "-map", "[#{@current_video_label}]",
+        "-map", "#{audio_index}:a",
+        "-t", @duration.to_s,
+        "-r", @fps.to_s,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        output
+      ]
+    else
+      [
+        "ffmpeg", "-y",
+        *@input_args,
+        "-filter_complex", @filters.join(";"),
+        "-map", "[#{@current_video_label}]",
+        "-t", @duration.to_s,
+        "-r", @fps.to_s,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        output
+      ]
+    end
+  end
+
+  def image_fade_filter(animation, start_time, end_time)
+    case animation
+    when "none"
+      ""
+    when "fade", "slide_left", "slide_right", "slide_up", "slide_down", "pop"
+      fade_out_start = [end_time - 0.25, start_time].max
+      ",fade=t=in:st=#{start_time}:d=0.25:alpha=1,fade=t=out:st=#{fade_out_start}:d=0.25:alpha=1"
+    else
+      warn "Unknown animation '#{animation}', using fade"
+      fade_out_start = [end_time - 0.25, start_time].max
+      ",fade=t=in:st=#{start_time}:d=0.25:alpha=1,fade=t=out:st=#{fade_out_start}:d=0.25:alpha=1"
+    end
+  end
+
+  def overlay_x(value, animation, start_time)
+    target = position_x(value)
+    transition = 0.45
+
+    case animation
+    when "slide_left"
+      "if(lt(t,#{start_time + transition}), W-((t-#{start_time})/#{transition})*(W-(#{target})), #{target})"
+    when "slide_right"
+      "if(lt(t,#{start_time + transition}), -w+((t-#{start_time})/#{transition})*(#{target}+w), #{target})"
+    else
+      target
+    end
+  end
+
+  def overlay_y(value, animation, start_time)
+    target = position_y(value)
+    transition = 0.45
+
+    case animation
+    when "slide_up"
+      "if(lt(t,#{start_time + transition}), H-((t-#{start_time})/#{transition})*(H-(#{target})), #{target})"
+    when "slide_down"
+      "if(lt(t,#{start_time + transition}), -h+((t-#{start_time})/#{transition})*(#{target}+h), #{target})"
+    else
+      target
+    end
+  end
+
+  def position_x(value)
+    case value
+    when "center" then "(W-w)/2"
+    when "left" then "80"
+    when "right" then "W-w-80"
+    else value.to_s
+    end
+  end
+
+  def position_y(value)
+    case value
+    when "center" then "(H-h)/2"
+    when "top" then "120"
+    when "bottom" then "H-h-160"
+    else value.to_s
+    end
+  end
+
+  def drawtext_x(value)
+    case value
+    when "center" then "(w-text_w)/2"
+    when "left" then "80"
+    when "right" then "w-text_w-80"
+    else value.to_s
+    end
+  end
+
+  def drawtext_y(value)
+    case value
+    when "center" then "(h-text_h)/2"
+    when "top" then "140"
+    when "bottom" then "h-text_h-180"
+    else value.to_s
+    end
+  end
+
+  def resolve_file!(path)
+    full_path = absolute_path(path)
+    raise "File not found: #{full_path}" unless File.exist?(full_path)
+
+    full_path
+  end
+
+  def resolve_optional_file(path)
+    return nil if path.nil? || path.to_s.empty?
+
+    absolute_path(path)
+  end
+
+  def resolve_output(path)
+    absolute_path(path)
+  end
+
+  def absolute_path(path)
+    path = path.to_s
+    File.absolute_path(path.start_with?("/") ? path : File.join(@base_dir, path))
+  end
+
+  def escape_drawtext(text)
+    text.to_s
+        .gsub("\\", "\\\\")
+        .gsub(":", "\\:")
+        .gsub("'", "\\\\'")
+        .gsub("%", "\\%")
+        .gsub("\n", "\\n")
+  end
+
+  def escape_filter_path(path)
+    path.to_s.gsub("\\", "\\\\").gsub(":", "\\:").gsub("'", "\\\\'")
+  end
+
+  def integer(value)
+    Integer(value)
+  rescue ArgumentError, TypeError
+    raise ArgumentError, "Expected integer, got #{value.inspect}"
+  end
+
+  def number(value)
+    Float(value)
+  rescue ArgumentError, TypeError
+    raise ArgumentError, "Expected number, got #{value.inspect}"
+  end
+
+  def deep_merge(base, override)
+    base.merge(override) do |_key, old_value, new_value|
+      old_value.is_a?(Hash) && new_value.is_a?(Hash) ? deep_merge(old_value, new_value) : new_value
+    end
+  end
+end
+
+options = { dry_run: false }
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: ffmpeg_video_builder [options] path/to/project.json"
+  opts.on("--dry-run", "Print the FFmpeg command without executing it") do
+    options[:dry_run] = true
+  end
+  opts.on("-h", "--help", "Show help") do
+    puts opts
+    exit 0
+  end
+end
+
+parser.parse!
+config_path = ARGV.first
+
+unless config_path
+  warn parser
+  exit 1
+end
+
+begin
+  FFmpegVideoBuilder.call(config_path: config_path, dry_run: options[:dry_run])
+rescue StandardError => e
+  warn "Error: #{e.message}"
+  exit 1
+end
