@@ -59,6 +59,9 @@
 | `y` | string/number | `center` |
 | `animation` | string | `fade` |
 
+Automated icon search/download should use Iconify icon sets. Cache downloaded
+assets together with the selected icon ID, source URL, and icon set license.
+
 Animations:
 
 - `none`

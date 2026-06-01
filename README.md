@@ -178,6 +178,10 @@ The final output will end at the configured duration or audio/video duration, wh
 }
 ```
 
+For automated icon search and download, use Iconify icon sets. Store the
+selected icon ID, source URL, and icon set license with cached assets because
+Iconify licenses are defined per icon set.
+
 ### Rectangle
 
 ```json
