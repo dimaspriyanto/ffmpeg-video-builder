@@ -62,6 +62,38 @@
 Automated icon search/download should use Iconify icon sets. Cache downloaded
 assets together with the selected icon ID, source URL, and icon set license.
 
+Default Iconify search source:
+
+- `fluent` - Fluent UI System Icons, MIT
+
+Supported Iconify search source options:
+
+- `fluent` - Fluent UI System Icons, MIT
+- `material-symbols-light` - Material Symbols Light, Apache 2.0
+- `material-symbols` - Material Symbols, Apache 2.0
+- `arcticons` - Arcticons, CC BY-SA 4.0
+
+Icon search parameters:
+
+| Field | Type | Default |
+|---|---:|---:|
+| `keyword` | string | required |
+| `style` | string | `regular` |
+| `source` | string | `fluent` |
+| `license_type` | string | `permissive` |
+| `size` | integer | `512` |
+
+Supported `style` preferences include `bold`, `filled`, `regular`, `light`,
+`outline`, `rounded`, and `sharp`. The `bold` preference also matches `filled`
+icons because Fluent UI System Icons uses filled variants instead of a bold
+variant.
+
+Supported `license_type` values:
+
+- `permissive` - no-attribution commercial-friendly sources, such as MIT and Apache 2.0
+- `attribution` - attribution/share-alike sources, such as CC BY-SA 4.0
+- `any` - allow any supported source license type
+
 Animations:
 
 - `none`

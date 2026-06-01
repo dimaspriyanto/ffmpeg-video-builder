@@ -49,6 +49,12 @@ Dry-run only:
 bin/ffmpeg_video_builder --dry-run examples/project.json
 ```
 
+Search icons:
+
+```bash
+bin/ffmpeg_video_builder --icon-search "light bulb"
+```
+
 The example will generate:
 
 ```bash
@@ -181,6 +187,40 @@ The final output will end at the configured duration or audio/video duration, wh
 For automated icon search and download, use Iconify icon sets. Store the
 selected icon ID, source URL, and icon set license with cached assets because
 Iconify licenses are defined per icon set.
+
+Default icon search source:
+
+- `fluent` - Fluent UI System Icons, MIT
+
+Supported icon search source options:
+
+- `fluent` - Fluent UI System Icons, MIT
+- `material-symbols-light` - Material Symbols Light, Apache 2.0
+- `material-symbols` - Material Symbols, Apache 2.0
+- `arcticons` - Arcticons, CC BY-SA 4.0
+
+Required icon search parameter:
+
+- `keyword` - keyword to search
+
+Default icon search parameters:
+
+- `style` - `regular`
+- `source` - `fluent`
+- `license_type` - `permissive`
+- `size` - `512`
+
+Supported `style` preferences include `bold`, `filled`, `regular`, `light`,
+`outline`, `rounded`, and `sharp`.
+
+Supported `license_type` values:
+
+- `permissive` - no-attribution commercial-friendly sources, such as MIT and Apache 2.0
+- `attribution` - attribution/share-alike sources, such as CC BY-SA 4.0
+- `any` - allow any supported source license type
+
+The `bold` style preference also matches `filled` icons because Fluent UI System
+Icons uses filled variants instead of a bold variant.
 
 ### Rectangle
 

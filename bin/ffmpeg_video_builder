@@ -5,6 +5,7 @@ require "json"
 require "optparse"
 require "shellwords"
 require "English"
+require_relative "../lib/icon_search"
 
 class FFmpegVideoBuilder
   DEFAULTS = {
@@ -336,11 +337,36 @@ class FFmpegVideoBuilder
   end
 end
 
-options = { dry_run: false }
+options = {
+  dry_run: false,
+  icon_style: IconSearch::DEFAULT_STYLE,
+  icon_source: IconSearch::DEFAULT_SOURCE,
+  icon_license_type: IconSearch::DEFAULT_LICENSE_TYPE,
+  icon_size: IconSearch::DEFAULT_SIZE,
+  icon_limit: IconSearch::DEFAULT_LIMIT
+}
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: ffmpeg_video_builder [options] path/to/project.json"
   opts.on("--dry-run", "Print the FFmpeg command without executing it") do
     options[:dry_run] = true
+  end
+  opts.on("--icon-search KEYWORD", "Search Iconify icons by keyword and print JSON results") do |keyword|
+    options[:icon_search_keyword] = keyword
+  end
+  opts.on("--icon-style STYLE", "Icon style preference, default: #{IconSearch::DEFAULT_STYLE}") do |style|
+    options[:icon_style] = style
+  end
+  opts.on("--icon-source SOURCE", "Iconify source prefix, default: #{IconSearch::DEFAULT_SOURCE}") do |source|
+    options[:icon_source] = source
+  end
+  opts.on("--icon-license-type TYPE", "Icon license type, default: #{IconSearch::DEFAULT_LICENSE_TYPE}") do |license_type|
+    options[:icon_license_type] = license_type
+  end
+  opts.on("--icon-size PIXELS", Integer, "Icon asset size in pixels, default: #{IconSearch::DEFAULT_SIZE}") do |size|
+    options[:icon_size] = size
+  end
+  opts.on("--icon-limit COUNT", Integer, "Maximum icon search results, default: #{IconSearch::DEFAULT_LIMIT}") do |limit|
+    options[:icon_limit] = limit
   end
   opts.on("-h", "--help", "Show help") do
     puts opts
@@ -349,14 +375,28 @@ parser = OptionParser.new do |opts|
 end
 
 parser.parse!
-config_path = ARGV.first
-
-unless config_path
-  warn parser
-  exit 1
-end
 
 begin
+  if options[:icon_search_keyword]
+    results = IconSearch.search(
+      keyword: options.fetch(:icon_search_keyword),
+      style: options.fetch(:icon_style),
+      source: options.fetch(:icon_source),
+      license_type: options.fetch(:icon_license_type),
+      size: options.fetch(:icon_size),
+      limit: options.fetch(:icon_limit)
+    )
+    puts JSON.pretty_generate(results.map(&:to_h))
+    exit 0
+  end
+
+  config_path = ARGV.first
+
+  unless config_path
+    warn parser
+    exit 1
+  end
+
   FFmpegVideoBuilder.call(config_path: config_path, dry_run: options[:dry_run])
 rescue StandardError => e
   warn "Error: #{e.message}"
