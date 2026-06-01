@@ -1,5 +1,34 @@
 # Config Reference
 
+## Script pipeline
+
+The primary bundle input is a text script:
+
+```bash
+bin/ffmpeg_video_builder script.txt
+```
+
+The pipeline generates narration with local Kokoro, derives sentence subtitles
+with local Whisper, chooses icon keywords from the subtitle sentences, downloads
+matching Iconify icons, writes a generated `project.json`, and renders the final
+video with FFmpeg.
+
+Generated project files are written into `downloads/projects_RANDOM_ID/`:
+
+- `script.txt`
+- `voiceover.wav`
+- `sentences.json`
+- `sentences.srt`
+- `icon_plan.json`
+- `project.json`
+- `output.mp4`
+
+Manual JSON project configs are still supported:
+
+```bash
+bin/ffmpeg_video_builder examples/project.json
+```
+
 ## Root fields
 
 | Field | Type | Default | Description |

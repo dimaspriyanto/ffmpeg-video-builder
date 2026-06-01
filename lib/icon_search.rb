@@ -100,7 +100,7 @@ module IconSearch
     )
   end
 
-  def self.search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads")
+  def self.search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads", download_dir: nil)
     Client.new.search_and_download(
       keyword: keyword,
       style: style,
@@ -108,7 +108,8 @@ module IconSearch
       license_type: license_type,
       size: size,
       limit: limit,
-      downloads_root: downloads_root
+      downloads_root: downloads_root,
+      download_dir: download_dir
     )
   end
 
@@ -131,7 +132,7 @@ module IconSearch
       end
     end
 
-    def search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads")
+    def search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads", download_dir: nil)
       results = search(
         keyword: keyword,
         style: style,
@@ -140,7 +141,7 @@ module IconSearch
         size: size,
         limit: limit
       )
-      download_dir = create_download_dir(downloads_root)
+      download_dir = download_dir ? ensure_download_dir(download_dir) : create_download_dir(downloads_root)
 
       results.each do |result|
         result.downloaded_file = download_icon(result, download_dir)
@@ -300,8 +301,12 @@ module IconSearch
     def create_download_dir(downloads_root)
       root = File.expand_path(downloads_root)
       dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
-      FileUtils.mkdir_p(dir)
-      dir
+      ensure_download_dir(dir)
+    end
+
+    def ensure_download_dir(download_dir)
+      FileUtils.mkdir_p(download_dir)
+      File.expand_path(download_dir)
     end
 
     def download_icon(result, download_dir)

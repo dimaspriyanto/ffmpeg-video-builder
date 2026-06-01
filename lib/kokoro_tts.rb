@@ -26,7 +26,7 @@ module KokoroTTS
     end
   end
 
-  def self.speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: "downloads", python: ENV.fetch("KOKORO_PYTHON", DEFAULT_PYTHON), script: ENV.fetch("KOKORO_SCRIPT", DEFAULT_SCRIPT))
+  def self.speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: "downloads", download_dir: nil, python: ENV.fetch("KOKORO_PYTHON", DEFAULT_PYTHON), script: ENV.fetch("KOKORO_SCRIPT", DEFAULT_SCRIPT))
     Client.new.speak(
       text: text,
       text_file: text_file,
@@ -34,17 +34,18 @@ module KokoroTTS
       speed: speed,
       lang_code: lang_code,
       downloads_root: downloads_root,
+      download_dir: download_dir,
       python: python,
       script: script
     )
   end
 
   class Client
-    def speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: "downloads", python: DEFAULT_PYTHON, script: DEFAULT_SCRIPT)
+    def speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: "downloads", download_dir: nil, python: DEFAULT_PYTHON, script: DEFAULT_SCRIPT)
       input = normalize_input(text, text_file)
       python = normalize_command(python, "KOKORO_PYTHON")
       script = validate_script!(script)
-      download_dir = create_download_dir(downloads_root)
+      download_dir = download_dir ? ensure_download_dir(download_dir) : create_download_dir(downloads_root)
       audio_file = File.join(download_dir, DEFAULT_OUTPUT_FILE)
 
       stdout, stderr = run_kokoro(
@@ -145,8 +146,12 @@ module KokoroTTS
     def create_download_dir(downloads_root)
       root = File.expand_path(downloads_root)
       dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
-      FileUtils.mkdir_p(dir)
-      dir
+      ensure_download_dir(dir)
+    end
+
+    def ensure_download_dir(download_dir)
+      FileUtils.mkdir_p(download_dir)
+      File.expand_path(download_dir)
     end
 
     def write_metadata(download_dir:, audio_file:, input:, voice:, speed:, lang_code:, script:)

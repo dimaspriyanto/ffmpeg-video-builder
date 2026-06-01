@@ -27,7 +27,7 @@ module OpenAIWhisper
     end
   end
 
-  def self.transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: "downloads", command: ENV.fetch("WHISPER_COMMAND", DEFAULT_COMMAND))
+  def self.transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: "downloads", download_dir: nil, command: ENV.fetch("WHISPER_COMMAND", DEFAULT_COMMAND))
     Client.new.transcribe(
       file: file,
       model: model,
@@ -37,17 +37,18 @@ module OpenAIWhisper
       language: language,
       prompt: prompt,
       downloads_root: downloads_root,
+      download_dir: download_dir,
       command: command
     )
   end
 
   class Client
-    def transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: "downloads", command: DEFAULT_COMMAND)
+    def transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: "downloads", download_dir: nil, command: DEFAULT_COMMAND)
       file = validate_audio_file!(file)
       command = command.to_s.strip
       command = DEFAULT_COMMAND if command.empty?
       validate_command!(command)
-      download_dir = create_download_dir(downloads_root)
+      download_dir = download_dir ? ensure_download_dir(download_dir) : create_download_dir(downloads_root)
 
       stdout, stderr = run_whisper(
         command: command,
@@ -124,8 +125,12 @@ module OpenAIWhisper
     def create_download_dir(downloads_root)
       root = File.expand_path(downloads_root)
       dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
-      FileUtils.mkdir_p(dir)
-      dir
+      ensure_download_dir(dir)
+    end
+
+    def ensure_download_dir(download_dir)
+      FileUtils.mkdir_p(download_dir)
+      File.expand_path(download_dir)
     end
 
     def parse_json_output(output_files)

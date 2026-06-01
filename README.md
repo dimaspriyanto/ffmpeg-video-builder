@@ -55,13 +55,31 @@ From the repository root:
 
 ```bash
 chmod +x bin/ffmpeg_video_builder
-bin/ffmpeg_video_builder examples/project.json
+bin/ffmpeg_video_builder script.txt
 ```
 
 Dry-run only:
 
 ```bash
-bin/ffmpeg_video_builder --dry-run examples/project.json
+bin/ffmpeg_video_builder --dry-run script.txt
+```
+
+The main input is a text script. The full pipeline:
+
+1. Generate narration audio with local Kokoro.
+2. Generate sentence timings and subtitles with local Whisper.
+3. Choose an icon keyword for each sentence.
+4. Search and download icons from Iconify.
+5. Generate a project config and render the video with FFmpeg.
+
+Generated assets are written into `downloads/projects_RANDOM_ID/`, including
+`script.txt`, `voiceover.wav`, `sentences.json`, `sentences.srt`,
+`icon_plan.json`, `project.json`, and `output.mp4`.
+
+Manual JSON project configs are still supported:
+
+```bash
+bin/ffmpeg_video_builder examples/project.json
 ```
 
 Search icons:
@@ -102,7 +120,7 @@ Outputs are written into a new `downloads/projects_RANDOM_ID/` directory. The
 default local Whisper model is `turbo`, the default output format is `json`, and
 word timestamps are enabled so the script can derive sentence-level timing.
 
-The example will generate:
+The JSON example will generate:
 
 ```bash
 examples/output.mp4

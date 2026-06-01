@@ -8,6 +8,7 @@ require "English"
 require_relative "../lib/icon_search"
 require_relative "../lib/kokoro_tts"
 require_relative "../lib/openai_whisper"
+require_relative "../lib/script_video_pipeline"
 
 class FFmpegVideoBuilder
   DEFAULTS = {
@@ -355,7 +356,7 @@ options = {
   whisper_word_timestamps: OpenAIWhisper::DEFAULT_WORD_TIMESTAMPS
 }
 parser = OptionParser.new do |opts|
-  opts.banner = "Usage: ffmpeg_video_builder [options] path/to/project.json"
+  opts.banner = "Usage: ffmpeg_video_builder [options] path/to/script.txt|path/to/project.json"
   opts.on("--dry-run", "Print the FFmpeg command without executing it") do
     options[:dry_run] = true
   end
@@ -461,14 +462,36 @@ begin
     exit 0
   end
 
-  config_path = ARGV.first
+  input_path = ARGV.first
 
-  unless config_path
+  unless input_path
     warn parser
     exit 1
   end
 
-  FFmpegVideoBuilder.call(config_path: config_path, dry_run: options[:dry_run])
+  if File.extname(input_path).downcase == ".json"
+    FFmpegVideoBuilder.call(config_path: input_path, dry_run: options[:dry_run])
+  else
+    pipeline = ScriptVideoPipeline.prepare(
+      script_file: input_path,
+      options: {
+        icon_style: options.fetch(:icon_style),
+        icon_source: options.fetch(:icon_source),
+        icon_license_type: options.fetch(:icon_license_type),
+        icon_size: options.fetch(:icon_size),
+        kokoro_voice: options.fetch(:kokoro_voice),
+        kokoro_speed: options.fetch(:kokoro_speed),
+        kokoro_lang_code: options.fetch(:kokoro_lang_code),
+        whisper_model: options.fetch(:whisper_model),
+        whisper_task: options.fetch(:whisper_task),
+        whisper_word_timestamps: options.fetch(:whisper_word_timestamps),
+        whisper_language: options[:whisper_language],
+        whisper_prompt: options[:whisper_prompt]
+      }
+    )
+    puts JSON.pretty_generate(pipeline.to_h)
+    FFmpegVideoBuilder.call(config_path: pipeline.config_file, dry_run: options[:dry_run])
+  end
 rescue StandardError => e
   warn "Error: #{e.message}"
   exit 1
