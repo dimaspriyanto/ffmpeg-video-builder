@@ -18,15 +18,23 @@ module ScriptVideoPipeline
   DEFAULT_ICON_WIDTH = 320
   DEFAULT_ICON_X = "center"
   DEFAULT_ICON_Y = 560
-  DEFAULT_TEXT_Y = 1420
-  DEFAULT_TEXT_FONT_SIZE = 46
+  DEFAULT_WATERMARK_TEXT = "Financial\nAdvice"
+  DEFAULT_WATERMARK_Y = 80
+  DEFAULT_WATERMARK_FONT_SIZE = 30
+  DEFAULT_WATERMARK_WIDTH = 360
+  DEFAULT_WATERMARK_CANVAS_WIDTH = 480
+  DEFAULT_TEXT_Y = 1320
+  DEFAULT_TEXT_FONT_SIZE = 54
   DEFAULT_TEXT_WIDTH = 1000
   DEFAULT_TEXT_CANVAS_WIDTH = 1080
   DEFAULT_TEXT_RASTERIZE_SIZE = 640
-  DEFAULT_TEXT_MAX_LINE_LENGTH = 22
+  DEFAULT_TEXT_MAX_LINE_LENGTH = 20
+  DEFAULT_SUBTITLE_WORDS_PER_PARAGRAPH = 12
   DEFAULT_OPENING_TITLE_DURATION = 3.0
   DEFAULT_ICON_CANDIDATE_LIMIT = 8
-  ICON_ANIMATIONS = %w[pop slide_left slide_right fade].freeze
+  ICON_ANIMATIONS = %w[
+    pop fade slide_left slide_right drop_in zoom_blur bounce rotate_in wipe_reveal pulse_in
+  ].freeze
   FALLBACK_ICON_KEYWORDS = %w[
     money wallet bank savings chart calendar document lightbulb idea
   ].freeze
@@ -42,6 +50,8 @@ module ScriptVideoPipeline
     who whom why will with you your yours yourself yourselves
     around first heres means might instead still trying
   ].freeze
+
+  ScriptContent = Struct.new(:title, :category, :body, keyword_init: true)
 
   Result = Struct.new(:project_dir, :script_file, :audio_file, :subtitle_file, :icon_plan_file, :config_file, :output_file, keyword_init: true) do
     def to_h
@@ -64,10 +74,10 @@ module ScriptVideoPipeline
   class Client
     def prepare(script_file:, options: {})
       script_file = validate_script_file!(script_file)
+      script_content = parse_script_content(script_file)
       project_dir = create_project_dir(options.fetch(:downloads_root, DEFAULT_DOWNLOADS_ROOT))
       local_script_file = File.join(project_dir, "script_input.txt")
-      FileUtils.cp(script_file, local_script_file)
-      title_text = first_paragraph(local_script_file)
+      File.write(local_script_file, script_content.body)
 
       narration = KokoroTTS.speak(
         text_file: local_script_file,
@@ -93,12 +103,22 @@ module ScriptVideoPipeline
 
       icon_plan = build_icon_plan(sentences, project_dir, options)
       icon_plan_file = write_json(File.join(project_dir, "icon_plan.json"), icon_plan)
-      config = build_ffmpeg_config(sentences, icon_plan, narration.audio_file, project_dir, options, title_text: title_text)
+      config = build_ffmpeg_config(
+        sentences,
+        icon_plan,
+        narration.audio_file,
+        project_dir,
+        options,
+        title_text: script_content.title,
+        category_text: script_content.category
+      )
       config_file = write_json(File.join(project_dir, "config_project.json"), config)
 
       write_json(
         File.join(project_dir, "pipeline_metadata.json"),
         {
+          title: script_content.title,
+          category: script_content.category,
           script_file: local_script_file,
           audio_file: narration.audio_file,
           subtitle_file: transcription.sentence_files[:srt],
@@ -132,6 +152,78 @@ module ScriptVideoPipeline
       ProjectDirectory.create(root: downloads_root)
     end
 
+    def parse_script_content(script_file)
+      text = File.read(script_file, encoding: "UTF-8").gsub(/\r\n?/, "\n")
+      lines = text.lines(chomp: true)
+      raise ArgumentError, "Script file is empty: #{script_file}" if lines.all? { |line| line.strip.empty? }
+
+      title = nil
+      category = nil
+      content_index = lines.find_index { |line| line.strip.match?(/\AContent:\s*/i) }
+
+      if content_index
+        header_lines = lines[0...content_index]
+        title, category = extract_script_headers(header_lines)
+        first_content = lines[content_index].strip.sub(/\AContent:\s*/i, "")
+        body_lines = []
+        body_lines << first_content unless first_content.empty?
+        body_lines.concat(lines[(content_index + 1)..] || [])
+      else
+        body_lines = []
+        reading_headers = true
+
+        lines.each do |line|
+          stripped = line.strip
+          if reading_headers
+            if (match = stripped.match(/\ATitle:\s*(.+)\z/i))
+              title = match[1].strip
+              next
+            end
+
+            if (match = stripped.match(/\ACategory:\s*(.+)\z/i))
+              category = match[1].strip
+              next
+            end
+
+            next if stripped.empty? && (title || category)
+          end
+
+          reading_headers = false
+          body_lines << line
+        end
+      end
+
+      body = normalize_script_body(body_lines.join("\n"), script_file)
+      ScriptContent.new(
+        title: title.to_s.strip.empty? ? first_paragraph_text(body) : title.to_s.strip,
+        category: category.to_s.strip,
+        body: body
+      )
+    end
+
+    def extract_script_headers(lines)
+      title = nil
+      category = nil
+
+      lines.each do |line|
+        case line.strip
+        when /\ATitle:\s*(.+)\z/i
+          title = Regexp.last_match(1).strip
+        when /\ACategory:\s*(.+)\z/i
+          category = Regexp.last_match(1).strip
+        end
+      end
+
+      [title, category]
+    end
+
+    def normalize_script_body(text, script_file)
+      body = text.gsub(/\A[[:space:]]+/, "").gsub(/[[:space:]]+\z/, "")
+      raise ArgumentError, "Script content is empty after parsing headers: #{script_file}" if body.empty?
+
+      "#{body}\n"
+    end
+
     def build_icon_plan(sentences, project_dir, options)
       used_icon_ids = {}
 
@@ -162,9 +254,9 @@ module ScriptVideoPipeline
       end
     end
 
-    def build_ffmpeg_config(sentences, icon_plan, audio_file, project_dir, options, title_text:)
+    def build_ffmpeg_config(sentences, icon_plan, audio_file, project_dir, options, title_text:, category_text:)
       duration = [sentences.map { |sentence| sentence.fetch("end").to_f }.max + 0.35, 1.0].max.round(3)
-      elements = []
+      elements = [watermark_element(duration, category_text)]
       visible_icons = icon_plan.select { |planned_icon| planned_icon["icon_file"] }
       icon_width = options.fetch(:pipeline_icon_width, DEFAULT_ICON_WIDTH)
 
@@ -193,20 +285,25 @@ module ScriptVideoPipeline
           }
         end
 
-        elements << {
-          "type" => "text",
-          "text" => wrap_text(text, DEFAULT_TEXT_MAX_LINE_LENGTH),
-          "start" => text_start,
-          "end" => text_end,
-          "font_size" => DEFAULT_TEXT_FONT_SIZE,
-          "color" => "black",
-          "x" => "center",
-          "y" => DEFAULT_TEXT_Y,
-          "box" => false,
-          "fallback_width" => DEFAULT_TEXT_WIDTH,
-          "fallback_canvas_width" => DEFAULT_TEXT_CANVAS_WIDTH,
-          "fallback_rasterize_size" => DEFAULT_TEXT_RASTERIZE_SIZE
-        }
+        subtitle_paragraphs(text, text_start, text_end).each do |paragraph|
+          elements << {
+            "type" => "text",
+            "text" => wrap_text(paragraph.fetch("text"), DEFAULT_TEXT_MAX_LINE_LENGTH),
+            "start" => paragraph.fetch("start"),
+            "end" => paragraph.fetch("end"),
+            "paragraph_index" => paragraph.fetch("paragraph_index"),
+            "paragraph_count" => paragraph.fetch("paragraph_count"),
+            "font_size" => DEFAULT_TEXT_FONT_SIZE,
+            "color" => "black",
+            "x" => "center",
+            "y" => DEFAULT_TEXT_Y,
+            "text_align" => "left",
+            "box" => false,
+            "fallback_width" => DEFAULT_TEXT_WIDTH,
+            "fallback_canvas_width" => DEFAULT_TEXT_CANVAS_WIDTH,
+            "fallback_rasterize_size" => DEFAULT_TEXT_RASTERIZE_SIZE
+          }
+        end
       end
 
       {
@@ -219,6 +316,32 @@ module ScriptVideoPipeline
         "audio" => relative_path(audio_file, project_dir),
         "elements" => elements
       }
+    end
+
+    def watermark_element(duration, category_text)
+      {
+        "type" => "text",
+        "text" => watermark_text(category_text),
+        "start" => 0,
+        "end" => duration,
+        "font_size" => DEFAULT_WATERMARK_FONT_SIZE,
+        "color" => "black",
+        "x" => "center",
+        "y" => DEFAULT_WATERMARK_Y,
+        "text_align" => "center",
+        "box" => false,
+        "fallback_width" => DEFAULT_WATERMARK_WIDTH,
+        "fallback_canvas_width" => DEFAULT_WATERMARK_CANVAS_WIDTH,
+        "fallback_rasterize_size" => DEFAULT_TEXT_RASTERIZE_SIZE
+      }
+    end
+
+    def watermark_text(category_text)
+      text = category_text.to_s.strip
+      return DEFAULT_WATERMARK_TEXT if text.empty?
+      return text if text.include?("\n")
+
+      text.split(/\s+/).join("\n")
     end
 
     def icon_end_time(position, visible_icons, duration)
@@ -257,9 +380,8 @@ module ScriptVideoPipeline
       [last_keyword, nil]
     end
 
-    def first_paragraph(script_file)
-      File.read(script_file)
-          .split(/\R{2,}/)
+    def first_paragraph_text(text)
+      text.to_s.split(/\n{2,}/)
           .map(&:strip)
           .find { |paragraph| !paragraph.empty? }
           .to_s
@@ -279,6 +401,34 @@ module ScriptVideoPipeline
       end
 
       [natural_end, visual_start + 0.5].max.round(3)
+    end
+
+    def subtitle_paragraphs(text, start_time, end_time)
+      words = text.to_s.split(/\s+/)
+      return [] if words.empty?
+
+      chunks = words.each_slice(DEFAULT_SUBTITLE_WORDS_PER_PARAGRAPH).to_a
+      start_time = start_time.to_f
+      end_time = end_time.to_f
+      duration = [end_time - start_time, 0.001].max
+      chunk_duration = duration / chunks.length
+
+      chunks.each_with_index.map do |chunk, index|
+        chunk_start = (start_time + (chunk_duration * index)).round(3)
+        chunk_end = if index == chunks.length - 1
+                      end_time.round(3)
+                    else
+                      (start_time + (chunk_duration * (index + 1))).round(3)
+                    end
+
+        {
+          "text" => chunk.join(" "),
+          "start" => chunk_start,
+          "end" => chunk_end,
+          "paragraph_index" => index + 1,
+          "paragraph_count" => chunks.length
+        }
+      end
     end
 
     def icon_keywords(text)
