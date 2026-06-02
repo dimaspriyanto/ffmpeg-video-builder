@@ -3,8 +3,8 @@
 require "fileutils"
 require "json"
 require "open3"
-require "securerandom"
 require "tempfile"
+require_relative "project_directory"
 
 module KokoroTTS
   DEFAULT_PYTHON = "python3"
@@ -12,7 +12,7 @@ module KokoroTTS
   DEFAULT_VOICE = "af_heart"
   DEFAULT_SPEED = 1.0
   DEFAULT_LANG_CODE = "a"
-  DEFAULT_OUTPUT_FILE = "voiceover.wav"
+  DEFAULT_OUTPUT_FILE = "audio_voiceover.wav"
 
   Result = Struct.new(:download_dir, :audio_file, :metadata_file, :stdout, :stderr, keyword_init: true) do
     def to_h
@@ -26,7 +26,7 @@ module KokoroTTS
     end
   end
 
-  def self.speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: "downloads", download_dir: nil, python: ENV.fetch("KOKORO_PYTHON", DEFAULT_PYTHON), script: ENV.fetch("KOKORO_SCRIPT", DEFAULT_SCRIPT))
+  def self.speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: ProjectDirectory::DEFAULT_ROOT, download_dir: nil, python: ENV.fetch("KOKORO_PYTHON", DEFAULT_PYTHON), script: ENV.fetch("KOKORO_SCRIPT", DEFAULT_SCRIPT))
     Client.new.speak(
       text: text,
       text_file: text_file,
@@ -41,7 +41,7 @@ module KokoroTTS
   end
 
   class Client
-    def speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: "downloads", download_dir: nil, python: DEFAULT_PYTHON, script: DEFAULT_SCRIPT)
+    def speak(text: nil, text_file: nil, voice: DEFAULT_VOICE, speed: DEFAULT_SPEED, lang_code: DEFAULT_LANG_CODE, downloads_root: ProjectDirectory::DEFAULT_ROOT, download_dir: nil, python: DEFAULT_PYTHON, script: DEFAULT_SCRIPT)
       input = normalize_input(text, text_file)
       python = normalize_command(python, "KOKORO_PYTHON")
       script = validate_script!(script)
@@ -144,18 +144,15 @@ module KokoroTTS
     end
 
     def create_download_dir(downloads_root)
-      root = File.expand_path(downloads_root)
-      dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
-      ensure_download_dir(dir)
+      ProjectDirectory.create(root: downloads_root)
     end
 
     def ensure_download_dir(download_dir)
-      FileUtils.mkdir_p(download_dir)
-      File.expand_path(download_dir)
+      ProjectDirectory.ensure(download_dir)
     end
 
     def write_metadata(download_dir:, audio_file:, input:, voice:, speed:, lang_code:, script:)
-      metadata_file = File.join(download_dir, "kokoro.json")
+      metadata_file = File.join(download_dir, "audio_kokoro.json")
       payload = {
         audio_file: audio_file,
         input_type: input.fetch(:type),

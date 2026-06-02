@@ -3,8 +3,8 @@
 require "json"
 require "fileutils"
 require "net/http"
-require "securerandom"
 require "uri"
+require_relative "project_directory"
 
 module IconSearch
   DEFAULT_STYLE = "regular"
@@ -100,7 +100,7 @@ module IconSearch
     )
   end
 
-  def self.search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads", download_dir: nil)
+  def self.search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: ProjectDirectory::DEFAULT_ROOT, download_dir: nil)
     Client.new.search_and_download(
       keyword: keyword,
       style: style,
@@ -132,7 +132,7 @@ module IconSearch
       end
     end
 
-    def search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: "downloads", download_dir: nil)
+    def search_and_download(keyword:, style: DEFAULT_STYLE, source: DEFAULT_SOURCE, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, limit: DEFAULT_LIMIT, downloads_root: ProjectDirectory::DEFAULT_ROOT, download_dir: nil)
       results = search(
         keyword: keyword,
         style: style,
@@ -299,25 +299,22 @@ module IconSearch
     end
 
     def create_download_dir(downloads_root)
-      root = File.expand_path(downloads_root)
-      dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
-      ensure_download_dir(dir)
+      ProjectDirectory.create(root: downloads_root)
     end
 
     def ensure_download_dir(download_dir)
-      FileUtils.mkdir_p(download_dir)
-      File.expand_path(download_dir)
+      ProjectDirectory.ensure(download_dir)
     end
 
     def download_icon(result, download_dir)
-      file = File.join(download_dir, "#{safe_filename(result.id)}.svg")
+      file = File.join(download_dir, "icon_#{safe_filename(result.id)}.svg")
       File.binwrite(file, fetch_binary(URI(result.svg_url)))
       file
     end
 
     def write_metadata(batch)
       File.write(
-        File.join(batch.download_dir, "icons.json"),
+        File.join(batch.download_dir, "icon_metadata.json"),
         "#{JSON.pretty_generate(batch.to_h)}\n"
       )
     end

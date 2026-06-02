@@ -7,4 +7,5 @@
 /vendor/bundle
 /.bundle
 /downloads/
+/projects/
 /kokoro-test/

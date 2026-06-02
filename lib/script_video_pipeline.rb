@@ -3,14 +3,14 @@
 require "fileutils"
 require "json"
 require "pathname"
-require "securerandom"
 
 require_relative "icon_search"
 require_relative "kokoro_tts"
 require_relative "openai_whisper"
+require_relative "project_directory"
 
 module ScriptVideoPipeline
-  DEFAULT_DOWNLOADS_ROOT = "downloads"
+  DEFAULT_DOWNLOADS_ROOT = ProjectDirectory::DEFAULT_ROOT
   DEFAULT_WIDTH = 1080
   DEFAULT_HEIGHT = 1920
   DEFAULT_FPS = 30
@@ -55,7 +55,7 @@ module ScriptVideoPipeline
     def prepare(script_file:, options: {})
       script_file = validate_script_file!(script_file)
       project_dir = create_project_dir(options.fetch(:downloads_root, DEFAULT_DOWNLOADS_ROOT))
-      local_script_file = File.join(project_dir, "script.txt")
+      local_script_file = File.join(project_dir, "script_input.txt")
       FileUtils.cp(script_file, local_script_file)
 
       narration = KokoroTTS.speak(
@@ -83,10 +83,10 @@ module ScriptVideoPipeline
       icon_plan = build_icon_plan(sentences, project_dir, options)
       icon_plan_file = write_json(File.join(project_dir, "icon_plan.json"), icon_plan)
       config = build_ffmpeg_config(sentences, icon_plan, narration.audio_file, project_dir, options)
-      config_file = write_json(File.join(project_dir, "project.json"), config)
+      config_file = write_json(File.join(project_dir, "config_project.json"), config)
 
       write_json(
-        File.join(project_dir, "pipeline.json"),
+        File.join(project_dir, "pipeline_metadata.json"),
         {
           script_file: local_script_file,
           audio_file: narration.audio_file,
@@ -118,10 +118,7 @@ module ScriptVideoPipeline
     end
 
     def create_project_dir(downloads_root)
-      root = File.expand_path(downloads_root)
-      dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
-      FileUtils.mkdir_p(dir)
-      dir
+      ProjectDirectory.create(root: downloads_root)
     end
 
     def build_icon_plan(sentences, project_dir, options)
@@ -199,7 +196,7 @@ module ScriptVideoPipeline
       end
 
       {
-        "output" => "output.mp4",
+        "output" => "video_output.mp4",
         "width" => options.fetch(:width, DEFAULT_WIDTH),
         "height" => options.fetch(:height, DEFAULT_HEIGHT),
         "fps" => options.fetch(:fps, DEFAULT_FPS),

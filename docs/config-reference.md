@@ -10,18 +10,21 @@ bin/ffmpeg_video_builder script.txt
 
 The pipeline generates narration with local Kokoro, derives sentence subtitles
 with local Whisper, chooses icon keywords from the subtitle sentences, downloads
-matching Iconify icons, writes a generated `project.json`, and renders the final
+matching Iconify icons, writes a generated `config_project.json`, and renders the final
 video with FFmpeg.
 
-Generated project files are written into `downloads/projects_RANDOM_ID/`:
+Generated project files are written into `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/`:
 
-- `script.txt`
-- `voiceover.wav`
-- `sentences.json`
-- `sentences.srt`
+For example, the first project created on June 2, 2026 is written to
+`projects/Project_1_02062026/`.
+
+- `script_input.txt`
+- `audio_voiceover.wav`
+- `subtitle_sentences.json`
+- `subtitle_sentences.srt`
 - `icon_plan.json`
-- `project.json`
-- `output.mp4`
+- `config_project.json`
+- `video_output.mp4`
 
 Manual JSON project configs are still supported:
 
@@ -33,7 +36,7 @@ bin/ffmpeg_video_builder examples/project.json
 
 | Field | Type | Default | Description |
 |---|---:|---:|---|
-| `output` | string | `output.mp4` | Output video file path. |
+| `output` | string | `video_output.mp4` | Output video file path. |
 | `width` | integer | `1080` | Video width. |
 | `height` | integer | `1920` | Video height. |
 | `fps` | integer | `30` | Frames per second. |
@@ -112,8 +115,8 @@ Icon search parameters:
 | `license_type` | string | `permissive` |
 | `size` | integer | `512` |
 
-Icon searches download SVG assets into `downloads/projects_RANDOM_ID/` and write
-`icons.json` in the same directory with selected icon IDs, licenses, source
+Icon searches download SVG assets into `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/` and write
+`icon_metadata.json` in the same directory with selected icon IDs, licenses, source
 URLs, and local file paths.
 
 Supported `style` preferences include `bold`, `filled`, `regular`, `light`,
@@ -133,8 +136,8 @@ The script can call the local Kokoro helper at `bin/kokoro-tts` to generate
 narration audio. Kokoro installation is intentionally not handled by this
 bundle.
 
-Outputs are written into `downloads/projects_RANDOM_ID/`, including
-`voiceover.wav` and `kokoro.json`.
+Outputs are written into `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/`, including
+`audio_voiceover.wav` and `audio_kokoro.json`.
 
 | CLI option | Type | Default |
 |---|---:|---:|
@@ -155,8 +158,8 @@ times from an existing audio file. Whisper does not create audio from a text
 script; create or record audio first, then run Whisper to produce subtitle
 timings.
 
-Outputs are written into `downloads/projects_RANDOM_ID/`, including
-`sentences.json` and `sentences.srt`.
+Outputs are written into `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/`, including
+`subtitle_sentences.json` and `subtitle_sentences.srt`.
 
 | CLI option | Type | Default |
 |---|---:|---:|

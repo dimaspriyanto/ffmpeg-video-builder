@@ -3,7 +3,7 @@
 require "fileutils"
 require "json"
 require "open3"
-require "securerandom"
+require_relative "project_directory"
 
 module OpenAIWhisper
   DEFAULT_COMMAND = "whisper"
@@ -27,7 +27,7 @@ module OpenAIWhisper
     end
   end
 
-  def self.transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: "downloads", download_dir: nil, command: ENV.fetch("WHISPER_COMMAND", DEFAULT_COMMAND))
+  def self.transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: ProjectDirectory::DEFAULT_ROOT, download_dir: nil, command: ENV.fetch("WHISPER_COMMAND", DEFAULT_COMMAND))
     Client.new.transcribe(
       file: file,
       model: model,
@@ -43,13 +43,14 @@ module OpenAIWhisper
   end
 
   class Client
-    def transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: "downloads", download_dir: nil, command: DEFAULT_COMMAND)
+    def transcribe(file:, model: DEFAULT_MODEL, output_format: DEFAULT_OUTPUT_FORMAT, task: DEFAULT_TASK, word_timestamps: DEFAULT_WORD_TIMESTAMPS, language: nil, prompt: nil, downloads_root: ProjectDirectory::DEFAULT_ROOT, download_dir: nil, command: DEFAULT_COMMAND)
       file = validate_audio_file!(file)
       command = command.to_s.strip
       command = DEFAULT_COMMAND if command.empty?
       validate_command!(command)
       download_dir = download_dir ? ensure_download_dir(download_dir) : create_download_dir(downloads_root)
 
+      before_files = Dir[File.join(download_dir, "*")]
       stdout, stderr = run_whisper(
         command: command,
         file: file,
@@ -62,6 +63,7 @@ module OpenAIWhisper
         download_dir: download_dir
       )
 
+      normalize_whisper_outputs(download_dir, before_files)
       output_files = Dir[File.join(download_dir, "*")].sort
       response = parse_json_output(output_files)
       sentences = response ? sentence_timings(response) : []
@@ -123,14 +125,11 @@ module OpenAIWhisper
     end
 
     def create_download_dir(downloads_root)
-      root = File.expand_path(downloads_root)
-      dir = File.join(root, "projects_#{SecureRandom.hex(4)}")
-      ensure_download_dir(dir)
+      ProjectDirectory.create(root: downloads_root)
     end
 
     def ensure_download_dir(download_dir)
-      FileUtils.mkdir_p(download_dir)
-      File.expand_path(download_dir)
+      ProjectDirectory.ensure(download_dir)
     end
 
     def parse_json_output(output_files)
@@ -140,6 +139,23 @@ module OpenAIWhisper
       JSON.parse(File.read(json_file))
     rescue JSON::ParserError => e
       raise "Whisper wrote invalid JSON: #{e.message}"
+    end
+
+    def normalize_whisper_outputs(download_dir, before_files)
+      before = before_files.map { |file| File.expand_path(file) }
+      created = Dir[File.join(download_dir, "*")].reject do |file|
+        before.include?(File.expand_path(file))
+      end
+
+      created.each do |file|
+        extension = File.extname(file)
+        next if extension.empty?
+
+        target = File.join(download_dir, "subtitle_whisper#{extension}")
+        next if File.expand_path(file) == File.expand_path(target)
+
+        FileUtils.mv(file, target)
+      end
     end
 
     def sentence_timings(response)
@@ -225,8 +241,8 @@ module OpenAIWhisper
     end
 
     def write_sentence_files(download_dir, sentences)
-      json_file = File.join(download_dir, "sentences.json")
-      srt_file = File.join(download_dir, "sentences.srt")
+      json_file = File.join(download_dir, "subtitle_sentences.json")
+      srt_file = File.join(download_dir, "subtitle_sentences.srt")
 
       File.write(json_file, "#{JSON.pretty_generate(sentences)}\n")
       File.write(srt_file, sentences_to_srt(sentences))

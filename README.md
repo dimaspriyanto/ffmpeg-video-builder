@@ -72,9 +72,12 @@ The main input is a text script. The full pipeline:
 4. Search and download icons from Iconify.
 5. Generate a project config and render the video with FFmpeg.
 
-Generated assets are written into `downloads/projects_RANDOM_ID/`, including
-`script.txt`, `voiceover.wav`, `sentences.json`, `sentences.srt`,
-`icon_plan.json`, `project.json`, and `output.mp4`.
+Generated assets are written into `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/`, including
+`script_input.txt`, `audio_voiceover.wav`, `subtitle_sentences.json`, `subtitle_sentences.srt`,
+`icon_plan.json`, `config_project.json`, and `video_output.mp4`.
+
+For example, the first project created on June 2, 2026 is written to
+`projects/Project_1_02062026/`.
 
 Manual JSON project configs are still supported:
 
@@ -91,10 +94,10 @@ bin/ffmpeg_video_builder --icon-search "light bulb"
 Icon searches download SVG assets into a new directory:
 
 ```text
-downloads/projects_RANDOM_ID/
+projects/Project_INTEGER_SEQUENCE_DDMMYYYY/
 ```
 
-The command also writes `icons.json` in that directory with the selected icon
+The command also writes `icon_metadata.json` in that directory with the selected icon
 IDs, licenses, source URLs, and local file paths.
 
 Generate narration audio with local Kokoro:
@@ -103,8 +106,8 @@ Generate narration audio with local Kokoro:
 bin/ffmpeg_video_builder --kokoro-script script.txt
 ```
 
-Kokoro audio is written into a new `downloads/projects_RANDOM_ID/` directory as
-`voiceover.wav`.
+Kokoro audio is written into a new `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/` directory as
+`audio_voiceover.wav`.
 
 Create sentence timings and subtitles from audio with local Whisper:
 
@@ -116,7 +119,7 @@ Whisper analyzes an existing audio file. It does not create audio from a text
 script; use a TTS tool or recorded voice first, then run Whisper to produce
 sentence timestamps and subtitles.
 
-Outputs are written into a new `downloads/projects_RANDOM_ID/` directory. The
+Outputs are written into a new `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/` directory. The
 default local Whisper model is `turbo`, the default output format is `json`, and
 word timestamps are enabled so the script can derive sentence-level timing.
 
@@ -217,8 +220,8 @@ bin/ffmpeg_video_builder --whisper-transcribe voiceover.mp3
 
 This creates Whisper's JSON output plus:
 
-- `sentences.json` - sentence text with `start` and `end` seconds
-- `sentences.srt` - subtitle file using the same sentence timings
+- `subtitle_sentences.json` - sentence text with `start` and `end` seconds
+- `subtitle_sentences.srt` - subtitle file using the same sentence timings
 
 Optional flags:
 

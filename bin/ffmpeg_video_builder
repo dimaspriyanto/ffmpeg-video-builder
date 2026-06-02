@@ -12,7 +12,7 @@ require_relative "../lib/script_video_pipeline"
 
 class FFmpegVideoBuilder
   DEFAULTS = {
-    "output" => "output.mp4",
+    "output" => "video_output.mp4",
     "width" => 1080,
     "height" => 1920,
     "fps" => 30,
