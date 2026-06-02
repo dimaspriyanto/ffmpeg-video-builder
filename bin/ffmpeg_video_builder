@@ -105,28 +105,38 @@ class FFmpegVideoBuilder
   end
 
   def add_image_element(element, index)
-    file = prepare_image_file(resolve_file!(element.fetch("file")))
+    image = prepare_image_file(
+      resolve_file!(element.fetch("file")),
+      rasterize_size: element["rasterize_size"]
+    )
+    file = image.fetch(:file)
     start_time = number(element.fetch("start", 0))
     end_time = number(element.fetch("end", @duration))
     width = integer(element.fetch("width", 300))
     opacity = number(element.fetch("opacity", 1.0))
     animation = element.fetch("animation", "fade")
+    persist = truthy?(element.fetch("persist", false))
+    hold = truthy?(element.fetch("hold", persist))
+    remove_background = truthy?(element.fetch("remove_background", image.fetch(:remove_background)))
 
     input_label = "img#{index}"
     output_label = "v#{index}"
 
     @input_args += ["-loop", "1", "-t", @duration.to_s, "-i", file]
 
-    filter = "[#{@input_index}:v]scale=#{width}:-1,format=rgba"
+    filter = "[#{@input_index}:v]format=rgba"
+    filter += transparent_background_filter if remove_background
+    filter += ",scale=#{width}:-1,format=rgba"
     filter += ",colorchannelmixer=aa=#{opacity}" if opacity < 1.0
-    filter += image_fade_filter(animation, start_time, end_time)
+    filter += image_fade_filter(animation, start_time, end_time, hold: hold)
     filter += "[#{input_label}]"
     @filters << filter
 
     x = overlay_x(element.fetch("x", "center"), animation, start_time)
     y = overlay_y(element.fetch("y", "center"), animation, start_time)
 
-    @filters << "[#{@current_video_label}][#{input_label}]overlay=x='#{x}':y='#{y}':enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
+    overlay_end_time = persist ? @duration : end_time
+    @filters << "[#{@current_video_label}][#{input_label}]overlay=x='#{x}':y='#{y}':enable='between(t,#{start_time},#{overlay_end_time})'[#{output_label}]"
     @current_video_label = output_label
     @input_index += 1
   end
@@ -134,6 +144,7 @@ class FFmpegVideoBuilder
   def add_text_element(element, index)
     unless ffmpeg_filter_available?("drawtext")
       warn_missing_drawtext
+      add_text_image_element(element, index)
       return
     end
 
@@ -160,6 +171,26 @@ class FFmpegVideoBuilder
     drawtext += "enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
     @filters << drawtext
     @current_video_label = output_label
+  end
+
+  def add_text_image_element(element, index)
+    start_time = number(element.fetch("start", 0))
+    end_time = number(element.fetch("end", @duration))
+    text_file = write_text_svg(element, index)
+    fallback = {
+      "type" => "image",
+      "file" => text_file,
+      "start" => start_time,
+      "end" => end_time,
+      "width" => integer(element.fetch("fallback_width", 1000)),
+      "x" => element.fetch("x", "center"),
+      "y" => element.fetch("y", @height - 500),
+      "animation" => "none",
+      "remove_background" => true,
+      "rasterize_size" => integer(element.fetch("fallback_rasterize_size", 640))
+    }
+
+    add_image_element(fallback, index)
   end
 
   def add_rectangle_element(element, index)
@@ -215,15 +246,19 @@ class FFmpegVideoBuilder
     end
   end
 
-  def image_fade_filter(animation, start_time, end_time)
+  def image_fade_filter(animation, start_time, end_time, hold: false)
     case animation
     when "none"
       ""
     when "fade", "slide_left", "slide_right", "slide_up", "slide_down", "pop"
+      return ",fade=t=in:st=#{start_time}:d=0.25:alpha=1" if hold
+
       fade_out_start = [end_time - 0.25, start_time].max
       ",fade=t=in:st=#{start_time}:d=0.25:alpha=1,fade=t=out:st=#{fade_out_start}:d=0.25:alpha=1"
     else
       warn "Unknown animation '#{animation}', using fade"
+      return ",fade=t=in:st=#{start_time}:d=0.25:alpha=1" if hold
+
       fade_out_start = [end_time - 0.25, start_time].max
       ",fade=t=in:st=#{start_time}:d=0.25:alpha=1,fade=t=out:st=#{fade_out_start}:d=0.25:alpha=1"
     end
@@ -300,14 +335,23 @@ class FFmpegVideoBuilder
     full_path
   end
 
-  def prepare_image_file(file)
-    return file unless File.extname(file).downcase == ".svg"
-    return file if ffmpeg_decoder_available?("svg")
+  def prepare_image_file(file, rasterize_size: nil)
+    return { file: file, remove_background: false } unless File.extname(file).downcase == ".svg"
+    return { file: file, remove_background: false } if ffmpeg_decoder_available?("svg")
 
-    rasterize_svg!(file)
+    { file: rasterize_svg!(file, size: rasterize_size), remove_background: true }
   end
 
-  def rasterize_svg!(file)
+  def transparent_background_filter
+    unless ffmpeg_filter_available?("colorkey")
+      warn_missing_colorkey
+      return ""
+    end
+
+    ",colorkey=white:0.08:0.0"
+  end
+
+  def rasterize_svg!(file, size: nil)
     target = file.sub(/\.svg\z/i, ".png")
     return target if File.file?(target)
 
@@ -318,7 +362,7 @@ class FFmpegVideoBuilder
 
     output_dir = File.dirname(file)
     generated = File.join(output_dir, "#{File.basename(file)}.png")
-    command = [qlmanage, "-t", "-s", "512", "-o", output_dir, file]
+    command = [qlmanage, "-t", "-s", (size || 512).to_s, "-o", output_dir, file]
     ok = system(*command, out: File::NULL, err: File::NULL)
 
     unless ok && File.file?(generated)
@@ -327,6 +371,52 @@ class FFmpegVideoBuilder
 
     FileUtils.mv(generated, target)
     target
+  end
+
+  def write_text_svg(element, index)
+    dir = File.join(@base_dir, ".rendered_text")
+    FileUtils.mkdir_p(dir)
+    path = File.join(dir, "subtitle_#{format('%03d', index)}.svg")
+    width = integer(element.fetch("fallback_canvas_width", 1080))
+    font_size = integer(element.fetch("font_size", 46))
+    line_height = (font_size * 1.2).round
+    lines = element.fetch("text").to_s.split("\n")
+    height = [line_height * lines.length + 36, line_height + 36].max
+    y = ((height - (line_height * lines.length)) / 2.0 + font_size).round
+    color = svg_color(element.fetch("color", "black"))
+
+    File.write(path, text_svg(width: width, height: height, lines: lines, y: y, line_height: line_height, font_size: font_size, color: color))
+    FileUtils.rm_f(path.sub(/\.svg\z/i, ".png"))
+    path
+  end
+
+  def text_svg(width:, height:, lines:, y:, line_height:, font_size:, color:)
+    text_x = [font_size * 1.8, 72].max.round
+    text_lines = lines.each_with_index.map do |line, offset|
+      %(<text x="#{text_x}" y="#{y + (offset * line_height)}">#{escape_xml(line)}</text>)
+    end.join("\n")
+
+    <<~SVG
+      <svg xmlns="http://www.w3.org/2000/svg" width="#{width}" height="#{height}" viewBox="0 0 #{width} #{height}">
+        <rect width="100%" height="100%" fill="white"/>
+        <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Arial, sans-serif" font-size="#{font_size}" font-weight="700" fill="#{color}">
+          #{text_lines}
+        </g>
+      </svg>
+    SVG
+  end
+
+  def escape_xml(value)
+    value.to_s
+         .gsub("&", "&amp;")
+         .gsub("<", "&lt;")
+         .gsub(">", "&gt;")
+         .gsub('"', "&quot;")
+         .gsub("'", "&apos;")
+  end
+
+  def svg_color(value)
+    value.to_s.include?("@") ? value.to_s.split("@", 2).first : value.to_s
   end
 
   def ffmpeg_filter_available?(name)
@@ -359,8 +449,15 @@ class FFmpegVideoBuilder
   def warn_missing_drawtext
     return if @warned_missing_drawtext
 
-    warn "FFmpeg drawtext filter is unavailable; skipping burned-in text overlays. Subtitle timing files are still written."
+    warn "FFmpeg drawtext filter is unavailable; using generated subtitle image overlays."
     @warned_missing_drawtext = true
+  end
+
+  def warn_missing_colorkey
+    return if @warned_missing_colorkey
+
+    warn "FFmpeg colorkey filter is unavailable; SVG thumbnail backgrounds may remain visible."
+    @warned_missing_colorkey = true
   end
 
   def resolve_optional_file(path)
@@ -401,6 +498,14 @@ class FFmpegVideoBuilder
     Float(value)
   rescue ArgumentError, TypeError
     raise ArgumentError, "Expected number, got #{value.inspect}"
+  end
+
+  def truthy?(value)
+    case value
+    when true then true
+    when false, nil then false
+    else %w[1 true yes on].include?(value.to_s.strip.downcase)
+    end
   end
 
   def deep_merge(base, override)

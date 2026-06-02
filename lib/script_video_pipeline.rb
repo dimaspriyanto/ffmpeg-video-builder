@@ -14,13 +14,22 @@ module ScriptVideoPipeline
   DEFAULT_WIDTH = 1080
   DEFAULT_HEIGHT = 1920
   DEFAULT_FPS = 30
-  DEFAULT_BACKGROUND = { "type" => "color", "color" => "#111827" }.freeze
+  DEFAULT_BACKGROUND = { "type" => "color", "color" => "#FFC067" }.freeze
   DEFAULT_ICON_WIDTH = 320
   DEFAULT_ICON_X = "center"
   DEFAULT_ICON_Y = 560
-  DEFAULT_TEXT_Y = 980
-  DEFAULT_TEXT_FONT_SIZE = 48
-  ICON_ANIMATIONS = %w[pop slide_left slide_up slide_right].freeze
+  DEFAULT_TEXT_Y = 1420
+  DEFAULT_TEXT_FONT_SIZE = 46
+  DEFAULT_TEXT_WIDTH = 1000
+  DEFAULT_TEXT_CANVAS_WIDTH = 1080
+  DEFAULT_TEXT_RASTERIZE_SIZE = 640
+  DEFAULT_TEXT_MAX_LINE_LENGTH = 22
+  DEFAULT_OPENING_TITLE_DURATION = 3.0
+  DEFAULT_ICON_CANDIDATE_LIMIT = 8
+  ICON_ANIMATIONS = %w[pop slide_left slide_right fade].freeze
+  FALLBACK_ICON_KEYWORDS = %w[
+    money wallet bank savings chart calendar document lightbulb idea
+  ].freeze
 
   STOP_WORDS = %w[
     a about after again all am an and are as at be because been before being
@@ -31,6 +40,7 @@ module ScriptVideoPipeline
     than that the their theirs them themselves then there these they this those
     through to too under until up very was we were what when where which while
     who whom why will with you your yours yourself yourselves
+    around first heres means might instead still trying
   ].freeze
 
   Result = Struct.new(:project_dir, :script_file, :audio_file, :subtitle_file, :icon_plan_file, :config_file, :output_file, keyword_init: true) do
@@ -57,6 +67,7 @@ module ScriptVideoPipeline
       project_dir = create_project_dir(options.fetch(:downloads_root, DEFAULT_DOWNLOADS_ROOT))
       local_script_file = File.join(project_dir, "script_input.txt")
       FileUtils.cp(script_file, local_script_file)
+      title_text = first_paragraph(local_script_file)
 
       narration = KokoroTTS.speak(
         text_file: local_script_file,
@@ -82,7 +93,7 @@ module ScriptVideoPipeline
 
       icon_plan = build_icon_plan(sentences, project_dir, options)
       icon_plan_file = write_json(File.join(project_dir, "icon_plan.json"), icon_plan)
-      config = build_ffmpeg_config(sentences, icon_plan, narration.audio_file, project_dir, options)
+      config = build_ffmpeg_config(sentences, icon_plan, narration.audio_file, project_dir, options, title_text: title_text)
       config_file = write_json(File.join(project_dir, "config_project.json"), config)
 
       write_json(
@@ -122,20 +133,19 @@ module ScriptVideoPipeline
     end
 
     def build_icon_plan(sentences, project_dir, options)
+      used_icon_ids = {}
+
       sentences.map do |sentence|
         index = sentence.fetch("index")
-        keyword = icon_keyword(sentence.fetch("text"))
+        keywords = icon_keywords(sentence.fetch("text"))
         icon_dir = File.join(project_dir, "icons", format("%02d", index))
-        batch = IconSearch.search_and_download(
-          keyword: keyword,
-          style: options.fetch(:icon_style, IconSearch::DEFAULT_STYLE),
-          source: options.fetch(:icon_source, IconSearch::DEFAULT_SOURCE),
-          license_type: options.fetch(:icon_license_type, IconSearch::DEFAULT_LICENSE_TYPE),
-          size: options.fetch(:icon_size, IconSearch::DEFAULT_SIZE),
-          limit: 1,
-          download_dir: icon_dir
+        keyword, icon = first_matching_icon(
+          keywords: keywords,
+          icon_dir: icon_dir,
+          options: options,
+          used_icon_ids: used_icon_ids
         )
-        icon = batch.results.first
+        used_icon_ids[icon.id] = true if icon
 
         {
           "sentence_index" => index,
@@ -146,52 +156,56 @@ module ScriptVideoPipeline
           "duration" => (sentence.fetch("end").to_f - sentence.fetch("start").to_f).round(3),
           "icon_id" => icon&.id,
           "icon_file" => icon&.downloaded_file,
+          "icon_candidates" => keywords,
           "animation" => ICON_ANIMATIONS[(index - 1) % ICON_ANIMATIONS.length]
         }
       end
     end
 
-    def build_ffmpeg_config(sentences, icon_plan, audio_file, project_dir, options)
+    def build_ffmpeg_config(sentences, icon_plan, audio_file, project_dir, options, title_text:)
       duration = [sentences.map { |sentence| sentence.fetch("end").to_f }.max + 0.35, 1.0].max.round(3)
-      elements = [
-        {
-          "type" => "rectangle",
-          "start" => 0,
-          "end" => duration,
-          "x" => 70,
-          "y" => 250,
-          "width" => 940,
-          "height" => 1180,
-          "color" => "white@0.08"
-        }
-      ]
+      elements = []
+      visible_icons = icon_plan.select { |planned_icon| planned_icon["icon_file"] }
+      icon_width = options.fetch(:pipeline_icon_width, DEFAULT_ICON_WIDTH)
 
       icon_plan.each do |planned_icon|
+        text_start = visual_start_time(planned_icon)
+        text_end = visual_text_end_time(planned_icon, text_start)
+        text = planned_icon.fetch("sentence")
+
+        if planned_icon.fetch("sentence_index") == 1
+          text = title_text.empty? ? text : title_text
+        end
+
         if planned_icon["icon_file"]
+          position = visible_icons.index(planned_icon)
+          icon_start = visual_start_time(planned_icon)
           elements << {
             "type" => "image",
             "file" => relative_path(planned_icon.fetch("icon_file"), project_dir),
-            "start" => planned_icon.fetch("start"),
-            "end" => planned_icon.fetch("end"),
-            "width" => options.fetch(:pipeline_icon_width, DEFAULT_ICON_WIDTH),
+            "start" => icon_start,
+            "end" => icon_end_time(position, visible_icons, duration),
+            "width" => icon_width,
             "x" => DEFAULT_ICON_X,
             "y" => DEFAULT_ICON_Y,
-            "animation" => planned_icon.fetch("animation")
+            "animation" => safe_icon_animation(planned_icon),
+            "hold" => true
           }
         end
 
         elements << {
           "type" => "text",
-          "text" => wrap_text(planned_icon.fetch("sentence")),
-          "start" => planned_icon.fetch("start"),
-          "end" => planned_icon.fetch("end"),
+          "text" => wrap_text(text, DEFAULT_TEXT_MAX_LINE_LENGTH),
+          "start" => text_start,
+          "end" => text_end,
           "font_size" => DEFAULT_TEXT_FONT_SIZE,
-          "color" => "white",
+          "color" => "black",
           "x" => "center",
           "y" => DEFAULT_TEXT_Y,
-          "box" => true,
-          "box_color" => "black@0.35",
-          "box_border" => 22
+          "box" => false,
+          "fallback_width" => DEFAULT_TEXT_WIDTH,
+          "fallback_canvas_width" => DEFAULT_TEXT_CANVAS_WIDTH,
+          "fallback_rasterize_size" => DEFAULT_TEXT_RASTERIZE_SIZE
         }
       end
 
@@ -207,13 +221,91 @@ module ScriptVideoPipeline
       }
     end
 
-    def icon_keyword(text)
+    def icon_end_time(position, visible_icons, duration)
+      next_icon = visible_icons[position + 1]
+      return duration unless next_icon
+
+      visual_start_time(next_icon)
+    end
+
+    def safe_icon_animation(planned_icon)
+      animation = planned_icon["animation"].to_s
+      return animation if ICON_ANIMATIONS.include?(animation)
+
+      ICON_ANIMATIONS[(planned_icon.fetch("sentence_index") - 1) % ICON_ANIMATIONS.length]
+    end
+
+    def first_matching_icon(keywords:, icon_dir:, options:, used_icon_ids:)
+      last_keyword = keywords.first
+      last_batch = nil
+
+      keywords.each do |keyword|
+        last_keyword = keyword
+        last_batch = IconSearch.search_and_download(
+          keyword: keyword,
+          style: options.fetch(:icon_style, IconSearch::DEFAULT_STYLE),
+          source: options.fetch(:icon_source, IconSearch::DEFAULT_SOURCE),
+          license_type: options.fetch(:icon_license_type, IconSearch::DEFAULT_LICENSE_TYPE),
+          size: options.fetch(:icon_size, IconSearch::DEFAULT_SIZE),
+          limit: options.fetch(:icon_candidate_limit, DEFAULT_ICON_CANDIDATE_LIMIT),
+          download_dir: icon_dir
+        )
+        icon = last_batch.results.find { |result| !used_icon_ids[result.id] }
+        return [keyword, icon] if icon
+      end
+
+      [last_keyword, nil]
+    end
+
+    def first_paragraph(script_file)
+      File.read(script_file)
+          .split(/\R{2,}/)
+          .map(&:strip)
+          .find { |paragraph| !paragraph.empty? }
+          .to_s
+    end
+
+    def visual_start_time(planned_icon)
+      start = planned_icon.fetch("start").to_f
+      return 0.0 if planned_icon.fetch("sentence_index") == 1
+
+      [start, DEFAULT_OPENING_TITLE_DURATION].max.round(3)
+    end
+
+    def visual_text_end_time(planned_icon, visual_start)
+      natural_end = planned_icon.fetch("end").to_f
+      if planned_icon.fetch("sentence_index") == 1
+        return [natural_end, DEFAULT_OPENING_TITLE_DURATION].max.round(3)
+      end
+
+      [natural_end, visual_start + 0.5].max.round(3)
+    end
+
+    def icon_keywords(text)
       words = text.downcase.scan(/[a-z][a-z'-]*/)
                   .map { |word| word.delete("'") }
                   .reject { |word| STOP_WORDS.include?(word) || word.length < 3 }
-      return "idea" if words.empty?
+      domain_candidates = domain_icon_keywords(text.to_s.downcase, words)
+      candidates = words.sort_by.with_index { |word, index| [-word.length, index] }
+      candidates = domain_candidates + candidates + words
+      candidates += FALLBACK_ICON_KEYWORDS
 
-      words.each_with_index.max_by { |word, index| [word.length, -index] }.first
+      candidates.map(&:strip).reject(&:empty?).uniq
+    end
+
+    def domain_icon_keywords(text, words)
+      candidates = []
+      candidates += %w[money chart] if words.include?("inflation")
+      candidates += %w[currency money] if words.include?("euro") || text.include?("3.8%") || text.include?("3%")
+      candidates += %w[money wallet] if words.include?("cash")
+      candidates += %w[savings wallet money] if words.include?("emergency") || words.include?("fund")
+      candidates += %w[payment money] if words.include?("debt")
+      candidates += %w[chart money] if words.include?("invest") || words.include?("assets") || words.include?("market")
+      candidates += %w[bank savings] if words.include?("accounts") || words.include?("savings")
+      candidates += %w[bank money] if words.include?("rates") || words.include?("bank")
+      candidates += %w[money document] if words.include?("financial") || words.include?("advice") || words.include?("decision")
+      candidates += %w[arrow lightbulb] if words.include?("move")
+      candidates
     end
 
     def wrap_text(text, max_line_length = 30)
