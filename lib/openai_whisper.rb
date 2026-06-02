@@ -133,7 +133,9 @@ module OpenAIWhisper
     end
 
     def parse_json_output(output_files)
-      json_file = output_files.find { |file| File.extname(file) == ".json" }
+      json_file = output_files.find { |file| File.basename(file) == "subtitle_whisper.json" }
+      json_file ||= output_files.find { |file| File.extname(file) == ".json" && File.basename(file).start_with?("subtitle_") }
+      json_file ||= output_files.find { |file| File.extname(file) == ".json" }
       return nil unless json_file
 
       JSON.parse(File.read(json_file))

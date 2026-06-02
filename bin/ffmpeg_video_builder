@@ -2,6 +2,8 @@
 # frozen_string_literal: true
 
 require "json"
+require "fileutils"
+require "open3"
 require "optparse"
 require "shellwords"
 require "English"
@@ -103,7 +105,7 @@ class FFmpegVideoBuilder
   end
 
   def add_image_element(element, index)
-    file = resolve_file!(element.fetch("file"))
+    file = prepare_image_file(resolve_file!(element.fetch("file")))
     start_time = number(element.fetch("start", 0))
     end_time = number(element.fetch("end", @duration))
     width = integer(element.fetch("width", 300))
@@ -130,6 +132,11 @@ class FFmpegVideoBuilder
   end
 
   def add_text_element(element, index)
+    unless ffmpeg_filter_available?("drawtext")
+      warn_missing_drawtext
+      return
+    end
+
     start_time = number(element.fetch("start", 0))
     end_time = number(element.fetch("end", @duration))
     text = escape_drawtext(element.fetch("text"))
@@ -291,6 +298,69 @@ class FFmpegVideoBuilder
     raise "File not found: #{full_path}" unless File.exist?(full_path)
 
     full_path
+  end
+
+  def prepare_image_file(file)
+    return file unless File.extname(file).downcase == ".svg"
+    return file if ffmpeg_decoder_available?("svg")
+
+    rasterize_svg!(file)
+  end
+
+  def rasterize_svg!(file)
+    target = file.sub(/\.svg\z/i, ".png")
+    return target if File.file?(target)
+
+    qlmanage = "/usr/bin/qlmanage"
+    unless File.executable?(qlmanage)
+      raise "FFmpeg cannot decode SVG image input: #{file}. Install an FFmpeg build with SVG support or use PNG image assets."
+    end
+
+    output_dir = File.dirname(file)
+    generated = File.join(output_dir, "#{File.basename(file)}.png")
+    command = [qlmanage, "-t", "-s", "512", "-o", output_dir, file]
+    ok = system(*command, out: File::NULL, err: File::NULL)
+
+    unless ok && File.file?(generated)
+      raise "Could not rasterize SVG image input for FFmpeg: #{file}"
+    end
+
+    FileUtils.mv(generated, target)
+    target
+  end
+
+  def ffmpeg_filter_available?(name)
+    return true if @dry_run
+
+    available_ffmpeg_filters.include?(name)
+  end
+
+  def ffmpeg_decoder_available?(name)
+    return true if @dry_run
+
+    available_ffmpeg_decoders.include?(name)
+  end
+
+  def available_ffmpeg_filters
+    @available_ffmpeg_filters ||= ffmpeg_list("filters")
+  end
+
+  def available_ffmpeg_decoders
+    @available_ffmpeg_decoders ||= ffmpeg_list("decoders")
+  end
+
+  def ffmpeg_list(kind)
+    stdout, stderr, status = Open3.capture3("ffmpeg", "-hide_banner", "-#{kind}")
+    raise "Could not inspect FFmpeg #{kind}: #{stderr.empty? ? stdout : stderr}" unless status.success?
+
+    stdout.lines.map { |line| line.split[1] }.compact
+  end
+
+  def warn_missing_drawtext
+    return if @warned_missing_drawtext
+
+    warn "FFmpeg drawtext filter is unavailable; skipping burned-in text overlays. Subtitle timing files are still written."
+    @warned_missing_drawtext = true
   end
 
   def resolve_optional_file(path)
