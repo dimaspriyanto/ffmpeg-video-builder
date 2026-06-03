@@ -12,6 +12,32 @@ require_relative "../lib/kokoro_tts"
 require_relative "../lib/openai_whisper"
 require_relative "../lib/script_video_pipeline"
 
+def load_local_environment!
+  config_file = File.expand_path("../config/local.env", __dir__)
+  return unless File.file?(config_file)
+
+  File.readlines(config_file, chomp: true).each do |line|
+    stripped = line.strip
+    next if stripped.empty? || stripped.start_with?("#")
+
+    key, value = stripped.split("=", 2)
+    next if key.nil? || value.nil?
+
+    key = key.strip
+    value = value.strip
+    value = value[1..-2] if (value.start_with?('"') && value.end_with?('"')) ||
+                             (value.start_with?("'") && value.end_with?("'"))
+
+    if key == "PATH_PREPEND"
+      ENV["PATH"] = [value, ENV.fetch("PATH", "")].reject(&:empty?).join(File::PATH_SEPARATOR)
+    else
+      ENV[key] = value
+    end
+  end
+end
+
+load_local_environment!
+
 class FFmpegVideoBuilder
   DEFAULTS = {
     "output" => "video_output.mp4",
@@ -569,7 +595,7 @@ options = {
   kokoro_voice: KokoroTTS::DEFAULT_VOICE,
   kokoro_speed: KokoroTTS::DEFAULT_SPEED,
   kokoro_lang_code: KokoroTTS::DEFAULT_LANG_CODE,
-  whisper_model: OpenAIWhisper::DEFAULT_MODEL,
+  whisper_model: ENV.fetch("WHISPER_MODEL", OpenAIWhisper::DEFAULT_MODEL),
   whisper_output_format: OpenAIWhisper::DEFAULT_OUTPUT_FORMAT,
   whisper_task: OpenAIWhisper::DEFAULT_TASK,
   whisper_word_timestamps: OpenAIWhisper::DEFAULT_WORD_TIMESTAMPS
@@ -615,7 +641,7 @@ parser = OptionParser.new do |opts|
   opts.on("--whisper-transcribe AUDIO_FILE", "Transcribe an audio file with OpenAI Whisper") do |file|
     options[:whisper_audio_file] = file
   end
-  opts.on("--whisper-model MODEL", "Local Whisper model, default: #{OpenAIWhisper::DEFAULT_MODEL}") do |model|
+  opts.on("--whisper-model MODEL", "Local Whisper model, default: #{options.fetch(:whisper_model)}") do |model|
     options[:whisper_model] = model
   end
   opts.on("--whisper-output-format FORMAT", "Whisper output format, default: #{OpenAIWhisper::DEFAULT_OUTPUT_FORMAT}") do |format|
