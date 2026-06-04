@@ -3,6 +3,8 @@
 require "fileutils"
 require "json"
 require "pathname"
+require "date"
+require "time"
 
 require_relative "icon_search"
 require_relative "kokoro_tts"
@@ -29,6 +31,10 @@ module ScriptVideoPipeline
   DEFAULT_TEXT_CANVAS_WIDTH = 1080
   DEFAULT_TEXT_RASTERIZE_SIZE = 640
   DEFAULT_TEXT_MAX_LINE_LENGTH = 20
+  DEFAULT_WAVEFORM_WIDTH = DEFAULT_ICON_WIDTH
+  DEFAULT_WAVEFORM_HEIGHT = 64
+  DEFAULT_WAVEFORM_GAP = 44
+  DEFAULT_WAVEFORM_OPACITY = 0.72
   DEFAULT_SUBTITLE_WORDS_PER_PARAGRAPH = 12
   DEFAULT_OPENING_TITLE_DURATION = 3.0
   DEFAULT_ICON_CANDIDATE_LIMIT = 8
@@ -71,10 +77,51 @@ module ScriptVideoPipeline
     Client.new.prepare(script_file: script_file, options: options)
   end
 
+  def self.prepare_bulk(workspace_dir:, scripts_file: nil, options: {})
+    Client.new.prepare_bulk(workspace_dir: workspace_dir, scripts_file: scripts_file, options: options)
+  end
+
+  def self.rebuild(project_dir:, options: {})
+    Client.new.rebuild(project_dir: project_dir, options: options)
+  end
+
   class Client
     def prepare(script_file:, options: {})
       script_file = validate_script_file!(script_file)
       script_content = parse_script_content(script_file)
+      prepare_script_content(script_content: script_content, source_file: script_file, options: options)
+    end
+
+    def prepare_bulk(workspace_dir:, scripts_file: nil, options: {})
+      workspace_dir = validate_workspace_dir!(workspace_dir)
+      scripts_file = resolve_bulk_scripts_file(workspace_dir, scripts_file)
+      script_contents = parse_bulk_script_contents(scripts_file)
+      raise ArgumentError, "No scripts found in bulk script file: #{scripts_file}" if script_contents.empty?
+
+      background = options[:background] || detect_workspace_background(workspace_dir)
+      results = script_contents.map do |script_content|
+        prepare_script_content(
+          script_content: script_content,
+          source_file: scripts_file,
+          options: options.merge(background: background)
+        )
+      end
+
+      write_json(
+        File.join(workspace_dir, "bulk_manifest.json"),
+        {
+          "workspace_dir" => workspace_dir,
+          "scripts_file" => scripts_file,
+          "background" => background,
+          "generated_at" => Time.now.iso8601,
+          "videos" => results.map(&:to_h)
+        }
+      )
+
+      results
+    end
+
+    def prepare_script_content(script_content:, source_file:, options: {})
       project_dir = create_project_dir(options.fetch(:downloads_root, DEFAULT_DOWNLOADS_ROOT))
       local_script_file = File.join(project_dir, "script_input.txt")
       File.write(local_script_file, script_content.body)
@@ -119,11 +166,13 @@ module ScriptVideoPipeline
         {
           title: script_content.title,
           category: script_content.category,
+          source_script_file: source_file,
           script_file: local_script_file,
           audio_file: narration.audio_file,
           subtitle_file: transcription.sentence_files[:srt],
           icon_plan_file: icon_plan_file,
           config_file: config_file,
+          background: config.fetch("background"),
           output_file: File.join(project_dir, config.fetch("output"))
         }
       )
@@ -139,6 +188,64 @@ module ScriptVideoPipeline
       )
     end
 
+    def rebuild(project_dir:, options: {})
+      project_dir = validate_project_dir!(project_dir)
+      metadata = read_json(File.join(project_dir, "pipeline_metadata.json"), default: {})
+      existing_config = read_json(File.join(project_dir, "config_project.json"), default: {})
+      icon_plan_file = File.join(project_dir, "icon_plan.json")
+      subtitle_json_file = File.join(project_dir, "subtitle_sentences.json")
+      audio_file = metadata["audio_file"] || File.join(project_dir, "audio_voiceover.wav")
+
+      raise "Missing icon plan: #{icon_plan_file}" unless File.file?(icon_plan_file)
+      raise "Missing audio file: #{audio_file}" unless File.file?(audio_file)
+
+      icon_plan = read_json(icon_plan_file)
+      sentences = File.file?(subtitle_json_file) ? read_json(subtitle_json_file) : sentences_from_icon_plan(icon_plan)
+      raise "No sentence timings found for rebuild in #{project_dir}" if sentences.empty?
+
+      icon_plan = download_icons_from_plan(icon_plan, project_dir, options)
+      icon_plan_file = write_json(icon_plan_file, icon_plan)
+      rebuild_options = options.dup
+      existing_background = existing_config["background"] || metadata["background"]
+      rebuild_options[:background] = existing_background if existing_background && !rebuild_options.key?(:background)
+      rebuild_options[:width] ||= existing_config["width"] if existing_config["width"]
+      rebuild_options[:height] ||= existing_config["height"] if existing_config["height"]
+      rebuild_options[:fps] ||= existing_config["fps"] if existing_config["fps"]
+
+      config = build_ffmpeg_config(
+        sentences,
+        icon_plan,
+        audio_file,
+        project_dir,
+        rebuild_options,
+        title_text: metadata["title"].to_s,
+        category_text: metadata["category"].to_s
+      )
+      config_file = write_json(File.join(project_dir, "config_project.json"), config)
+
+      write_json(
+        File.join(project_dir, "pipeline_metadata.json"),
+        metadata.merge(
+          "audio_file" => audio_file,
+          "subtitle_file" => metadata["subtitle_file"] || File.join(project_dir, "subtitle_sentences.srt"),
+          "icon_plan_file" => icon_plan_file,
+          "config_file" => config_file,
+          "background" => config.fetch("background"),
+          "output_file" => File.join(project_dir, config.fetch("output"))
+        )
+      )
+
+      Result.new(
+        project_dir: project_dir,
+        script_file: metadata["script_file"] || File.join(project_dir, "script_input.txt"),
+        audio_file: audio_file,
+        subtitle_file: metadata["subtitle_file"] || File.join(project_dir, "subtitle_sentences.srt"),
+        icon_plan_file: icon_plan_file,
+        config_file: config_file,
+        output_file: File.join(project_dir, config.fetch("output"))
+      )
+    end
+
     private
 
     def validate_script_file!(script_file)
@@ -148,12 +255,123 @@ module ScriptVideoPipeline
       path
     end
 
+    def validate_workspace_dir!(workspace_dir)
+      path = File.expand_path(workspace_dir.to_s)
+      raise ArgumentError, "Workspace directory not found: #{path}" unless File.directory?(path)
+
+      path
+    end
+
+    def validate_project_dir!(project_dir)
+      path = File.expand_path(project_dir.to_s)
+      raise ArgumentError, "Project directory not found: #{path}" unless File.directory?(path)
+
+      path
+    end
+
     def create_project_dir(downloads_root)
       ProjectDirectory.create(root: downloads_root)
     end
 
+    def read_json(path, default: nil)
+      return default unless File.file?(path)
+
+      JSON.parse(File.read(path))
+    end
+
+    def sentences_from_icon_plan(icon_plan)
+      icon_plan.map do |planned_icon|
+        {
+          "index" => planned_icon["sentence_index"],
+          "start" => planned_icon.fetch("start"),
+          "end" => planned_icon.fetch("end"),
+          "text" => planned_icon.fetch("sentence")
+        }
+      end
+    end
+
+    def download_icons_from_plan(icon_plan, project_dir, options)
+      validate_unique_icon_ids!(icon_plan)
+
+      icon_plan.each_with_index.map do |planned_icon, index|
+        icon_id = planned_icon["icon_id"].to_s.strip
+        planned_icon = planned_icon.dup
+
+        if icon_id.empty?
+          planned_icon.delete("icon_file")
+          next planned_icon
+        end
+
+        icon_dir = File.join(project_dir, "icons", format("%02d", planned_icon["sentence_index"] || index + 1))
+        icon = IconSearch.download_icon_by_id(
+          icon_id: icon_id,
+          license_type: options.fetch(:icon_license_type, IconSearch::DEFAULT_LICENSE_TYPE),
+          size: options.fetch(:icon_size, IconSearch::DEFAULT_SIZE),
+          download_dir: icon_dir
+        )
+
+        planned_icon.merge(
+          "keyword" => planned_icon["keyword"].to_s.empty? ? icon.name : planned_icon["keyword"],
+          "icon_id" => icon.id,
+          "icon_file" => icon.downloaded_file,
+          "icon_license" => icon.license,
+          "icon_license_type" => icon.license_type,
+          "icon_source" => icon.source,
+          "icon_source_name" => icon.source_name,
+          "icon_style" => icon.style,
+          "icon_svg_url" => icon.svg_url
+        )
+      end
+    end
+
+    def validate_unique_icon_ids!(icon_plan)
+      seen = {}
+
+      icon_plan.each_with_index do |planned_icon, index|
+        icon_id = planned_icon["icon_id"].to_s.strip
+        next if icon_id.empty?
+
+        if seen[icon_id]
+          sentence = planned_icon["sentence_index"] || index + 1
+          raise ArgumentError, "Duplicate icon_id in icon_plan.json: #{icon_id}. Choose a different icon for sentence #{sentence}."
+        end
+
+        seen[icon_id] = true
+      end
+    end
+
     def parse_script_content(script_file)
       text = File.read(script_file, encoding: "UTF-8").gsub(/\r\n?/, "\n")
+      parse_script_text(text, script_file)
+    end
+
+    def parse_bulk_script_contents(scripts_file)
+      text = File.read(scripts_file, encoding: "UTF-8").gsub(/\r\n?/, "\n")
+      blocks = split_bulk_script_text(text)
+
+      blocks.each_with_index.map do |block, index|
+        parse_script_text(block, "#{scripts_file}##{index + 1}")
+      end
+    end
+
+    def split_bulk_script_text(text)
+      lines = text.lines(chomp: true)
+      title_indexes = lines.each_index.select { |index| lines[index].strip.match?(/\ATitle:\s*\S/i) }
+
+      if title_indexes.length > 1
+        return title_indexes.each_with_index.map do |start_index, index|
+          end_index = title_indexes[index + 1] || lines.length
+          lines[start_index...end_index].join("\n")
+        end
+      end
+
+      delimiter_blocks = text.split(/^\s*-{3,}\s*$/).map(&:strip).reject(&:empty?)
+      return delimiter_blocks if delimiter_blocks.length > 1
+
+      [text]
+    end
+
+    def parse_script_text(text, script_file)
       lines = text.lines(chomp: true)
       raise ArgumentError, "Script file is empty: #{script_file}" if lines.all? { |line| line.strip.empty? }
 
@@ -257,6 +475,7 @@ module ScriptVideoPipeline
     def build_ffmpeg_config(sentences, icon_plan, audio_file, project_dir, options, title_text:, category_text:)
       duration = [sentences.map { |sentence| sentence.fetch("end").to_f }.max + 0.35, 1.0].max.round(3)
       elements = [watermark_element(duration, category_text)]
+      elements << waveform_element(duration, audio_file, project_dir) if options.fetch(:pipeline_waveform, true)
       visible_icons = icon_plan.select { |planned_icon| planned_icon["icon_file"] }
       icon_width = options.fetch(:pipeline_icon_width, DEFAULT_ICON_WIDTH)
 
@@ -307,15 +526,126 @@ module ScriptVideoPipeline
       end
 
       {
-        "output" => "video_output.mp4",
+        "output" => output_filename(project_dir, title_text),
         "width" => options.fetch(:width, DEFAULT_WIDTH),
         "height" => options.fetch(:height, DEFAULT_HEIGHT),
         "fps" => options.fetch(:fps, DEFAULT_FPS),
         "duration" => duration,
-        "background" => DEFAULT_BACKGROUND,
+        "background" => background_config(options),
         "audio" => relative_path(audio_file, project_dir),
         "elements" => elements
       }
+    end
+
+    def background_config(options)
+      deep_dup(options.fetch(:background, DEFAULT_BACKGROUND))
+    end
+
+    def resolve_bulk_scripts_file(workspace_dir, scripts_file)
+      if scripts_file
+        direct_path = File.expand_path(scripts_file.to_s)
+        workspace_path = File.expand_path(scripts_file.to_s, workspace_dir)
+        return direct_path if File.file?(direct_path)
+        return workspace_path if File.file?(workspace_path)
+
+        raise ArgumentError, "Bulk script file not found: #{scripts_file}"
+      end
+
+      preferred = %w[scripts.txt script.txt bulk_scripts.txt input.txt content.txt]
+      preferred.each do |filename|
+        path = File.join(workspace_dir, filename)
+        return path if File.file?(path)
+      end
+
+      text_files = Dir.children(workspace_dir)
+                      .map { |entry| File.join(workspace_dir, entry) }
+                      .select { |path| File.file?(path) && File.extname(path).downcase == ".txt" }
+                      .sort
+
+      return text_files.first if text_files.length == 1
+
+      if text_files.empty?
+        raise ArgumentError, "No script text file found in #{workspace_dir}. Add scripts.txt or pass --bulk-scripts FILE."
+      end
+
+      raise ArgumentError, "Multiple text files found in #{workspace_dir}. Pass --bulk-scripts FILE."
+    end
+
+    def detect_workspace_background(workspace_dir)
+      preferred = supported_background_files(workspace_dir).select do |path|
+        File.basename(path).match?(/\Abackground\./i)
+      end
+      return background_config_from_path(preferred.sort.first) unless preferred.empty?
+
+      media_files = supported_background_files(workspace_dir)
+      return DEFAULT_BACKGROUND if media_files.empty?
+      return background_config_from_path(media_files.first) if media_files.length == 1
+
+      raise ArgumentError, "Multiple background media files found in #{workspace_dir}. Name one background.ext or pass --background-image/--background-video."
+    end
+
+    def supported_background_files(workspace_dir)
+      Dir.children(workspace_dir)
+         .map { |entry| File.join(workspace_dir, entry) }
+         .select { |path| File.file?(path) && background_media_type(path) }
+         .sort
+    end
+
+    def background_config_from_path(path)
+      { "type" => background_media_type(path), "path" => File.expand_path(path) }
+    end
+
+    def background_media_type(path)
+      case File.extname(path.to_s).downcase
+      when ".png", ".jpg", ".jpeg", ".webp", ".bmp"
+        "image"
+      when ".mp4", ".mov", ".webm", ".mkv"
+        "video"
+      end
+    end
+
+    def deep_dup(value)
+      JSON.parse(JSON.generate(value))
+    end
+
+    def waveform_element(duration, audio_file, project_dir)
+      {
+        "type" => "waveform",
+        "audio" => relative_path(audio_file, project_dir),
+        "start" => 0,
+        "end" => duration,
+        "width" => DEFAULT_WAVEFORM_WIDTH,
+        "height" => DEFAULT_WAVEFORM_HEIGHT,
+        "x" => "center",
+        "position" => "bottom",
+        "anchor_y" => DEFAULT_ICON_Y,
+        "anchor_height" => DEFAULT_ICON_WIDTH,
+        "gap" => DEFAULT_WAVEFORM_GAP,
+        "color" => "0x111111",
+        "opacity" => DEFAULT_WAVEFORM_OPACITY,
+        "mode" => "cline",
+        "scale" => "sqrt",
+        "remove_background" => true
+      }
+    end
+
+    def output_filename(project_dir, title_text)
+      "#{project_date_stamp(project_dir)}_#{title_filename_component(title_text)}.mp4"
+    end
+
+    def project_date_stamp(project_dir)
+      basename = File.basename(project_dir.to_s)
+      match = basename.match(/_(\d{8})\z/)
+      return match[1] if match
+
+      Date.today.strftime("%d%m%Y")
+    end
+
+    def title_filename_component(title_text)
+      words = title_text.to_s.scan(/[[:alnum:]]+/)
+      return "UntitledVideo" if words.empty?
+
+      words.map { |word| word[0].upcase + word[1..].to_s }.join
     end
 
     def watermark_element(duration, category_text)

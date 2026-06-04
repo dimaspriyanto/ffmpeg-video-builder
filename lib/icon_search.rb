@@ -33,6 +33,11 @@ module IconSearch
       name: "Arcticons",
       license: "CC BY-SA 4.0",
       license_type: "attribution"
+    },
+    "noto-v1" => {
+      name: "Noto Emoji (v1)",
+      license: "Apache 2.0",
+      license_type: "permissive"
     }
   }.freeze
 
@@ -113,6 +118,15 @@ module IconSearch
     )
   end
 
+  def self.download_icon_by_id(icon_id:, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, download_dir:)
+    Client.new.download_icon_by_id(
+      icon_id: icon_id,
+      license_type: license_type,
+      size: size,
+      download_dir: download_dir
+    )
+  end
+
   class Client
     API_BASE = "https://api.iconify.design"
 
@@ -152,7 +166,31 @@ module IconSearch
       batch
     end
 
+    def download_icon_by_id(icon_id:, license_type: DEFAULT_LICENSE_TYPE, size: DEFAULT_SIZE, download_dir:)
+      icon_id = clean_icon_id(icon_id)
+      source = icon_id.split(":", 2).first
+      license_type = clean_license_type(license_type)
+      validate_source_license_type!(source, license_type)
+      size = clean_size(size)
+      download_dir = ensure_download_dir(download_dir)
+      result = build_result(icon_id, source, inferred_style(icon_id), size)
+      result.downloaded_file = download_icon_file(result, download_dir)
+      batch = DownloadBatch.new(download_dir: download_dir, results: [result])
+      write_metadata(batch)
+      result
+    end
+
     private
+
+    def clean_icon_id(icon_id)
+      value = icon_id.to_s.strip
+      raise ArgumentError, "Icon id is required" if value.empty?
+      raise ArgumentError, "Icon id must use the Iconify prefix:name format, got #{value.inspect}" unless value.include?(":")
+
+      source = value.split(":", 2).first
+      clean_source(source)
+      value
+    end
 
     def clean_keyword(keyword)
       value = keyword.to_s.strip
@@ -163,11 +201,23 @@ module IconSearch
 
     def clean_source(source)
       value = source.to_s.strip
+      value = iconify_source_prefix(value)
       return DEFAULT_SOURCE if value.empty?
       return value if SUPPORTED_SOURCES.key?(value)
 
       allowed = SUPPORTED_SOURCES.keys.join(", ")
       raise ArgumentError, "Unsupported icon source: #{value.inspect}. Supported sources: #{allowed}"
+    end
+
+    def iconify_source_prefix(value)
+      uri = URI.parse(value)
+      if uri.is_a?(URI::HTTP) && uri.host == "icon-sets.iconify.design"
+        return uri.path.to_s.split("/").reject(&:empty?).first.to_s
+      end
+
+      value
+    rescue URI::InvalidURIError
+      value
     end
 
     def clean_license_type(license_type)
@@ -287,6 +337,15 @@ module IconSearch
       )
     end
 
+    def inferred_style(icon_id)
+      name = icon_name(icon_id)
+      STYLE_ALIASES.each do |style, tokens|
+        return style if tokens.any? { |token| name.include?(token) }
+      end
+
+      DEFAULT_STYLE
+    end
+
     def icon_name(icon_id)
       icon_id.to_s.split(":", 2).last
     end
@@ -307,6 +366,10 @@ module IconSearch
     end
 
     def download_icon(result, download_dir)
+      download_icon_file(result, download_dir)
+    end
+
+    def download_icon_file(result, download_dir)
       file = File.join(download_dir, "icon_#{safe_filename(result.id)}.svg")
       File.binwrite(file, fetch_binary(URI(result.svg_url)))
       file

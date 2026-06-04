@@ -7,6 +7,7 @@ require "open3"
 require "optparse"
 require "shellwords"
 require "English"
+require "uri"
 require_relative "../lib/icon_search"
 require_relative "../lib/kokoro_tts"
 require_relative "../lib/openai_whisper"
@@ -45,7 +46,7 @@ class FFmpegVideoBuilder
     "height" => 1920,
     "fps" => 30,
     "duration" => 10,
-    "background" => { "type" => "color", "color" => "black" },
+    "background" => { "type" => "color", "color" => "#FFC067" },
     "elements" => []
   }.freeze
 
@@ -93,7 +94,7 @@ class FFmpegVideoBuilder
 
     case bg.fetch("type", "color")
     when "color"
-      color = bg.fetch("color", "black")
+      color = bg.fetch("color", "#FFC067")
       @input_args += [
         "-f", "lavfi",
         "-i", "color=c=#{color}:s=#{@width}x#{@height}:d=#{@duration}:r=#{@fps}"
@@ -101,18 +102,32 @@ class FFmpegVideoBuilder
       @filters << "[0:v]format=yuv420p[base]"
       @input_index = 1
     when "image"
-      file = resolve_file!(bg.fetch("file"))
+      file = resolve_background_media!(bg)
       @input_args += ["-loop", "1", "-t", @duration.to_s, "-i", file]
-      @filters << "[0:v]scale=#{@width}:#{@height}:force_original_aspect_ratio=increase,crop=#{@width}:#{@height},format=yuv420p[base]"
+      @filters << "[0:v]scale=#{@width}:#{@height}:force_original_aspect_ratio=increase,crop=#{@width}:#{@height},setsar=1,format=yuv420p[base]"
       @input_index = 1
     when "video"
-      file = resolve_file!(bg.fetch("file"))
+      file = resolve_background_media!(bg)
       @input_args += ["-stream_loop", "-1", "-i", file]
-      @filters << "[0:v]scale=#{@width}:#{@height}:force_original_aspect_ratio=increase,crop=#{@width}:#{@height},trim=duration=#{@duration},setpts=PTS-STARTPTS,format=yuv420p[base]"
+      @filters << "[0:v]scale=#{@width}:#{@height}:force_original_aspect_ratio=increase,crop=#{@width}:#{@height},setsar=1,trim=duration=#{@duration},setpts=PTS-STARTPTS,format=yuv420p[base]"
       @input_index = 1
     else
       raise ArgumentError, "Unsupported background type: #{bg['type']}"
     end
+  end
+
+  def resolve_background_media!(background)
+    source = background["url"] || background["path"] || background["file"]
+    raise ArgumentError, "Background #{background.fetch('type')} requires url, path, or file" if source.nil? || source.to_s.empty?
+
+    remote_url?(source) ? source.to_s : resolve_file!(source)
+  end
+
+  def remote_url?(value)
+    uri = URI.parse(value.to_s)
+    uri.is_a?(URI::HTTP) && !uri.host.to_s.empty?
+  rescue URI::InvalidURIError
+    false
   end
 
   def add_elements
@@ -124,6 +139,8 @@ class FFmpegVideoBuilder
         add_text_element(element, index)
       when "rectangle"
         add_rectangle_element(element, index)
+      when "waveform"
+        add_waveform_element(element, index)
       else
         warn "Skipping unsupported element type: #{element['type']}"
       end
@@ -231,6 +248,56 @@ class FFmpegVideoBuilder
 
     @filters << "[#{@current_video_label}]drawbox=x=#{x}:y=#{y}:w=#{width}:h=#{height}:color=#{color}:t=fill:enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
     @current_video_label = output_label
+  end
+
+  def add_waveform_element(element, index)
+    audio_file = resolve_optional_file(element["audio"] || @config["audio"])
+    raise ArgumentError, "Waveform element requires an audio file" if audio_file.nil? || audio_file.empty?
+
+    start_time = number(element.fetch("start", 0))
+    end_time = number(element.fetch("end", @duration))
+    waveform_width = integer(element.fetch("width", 320))
+    waveform_height = integer(element.fetch("height", 64))
+    mode = element.fetch("mode", "cline")
+    scale = element.fetch("scale", "sqrt")
+    color = element.fetch("color", "0x111111")
+    opacity = number(element.fetch("opacity", 0.72))
+    remove_background = truthy?(element.fetch("remove_background", true))
+    input_label = "wave#{index}"
+    output_label = "vwave#{index}"
+
+    @input_args += ["-i", audio_file]
+    audio_index = @input_index
+    @input_index += 1
+
+    filter = "[#{audio_index}:a]showwaves=s=#{waveform_width}x#{waveform_height}:mode=#{mode}:colors=#{color}:scale=#{scale}:r=#{@fps},format=rgba"
+    filter += ",colorkey=black:0.01:0.0" if remove_background
+    filter += ",colorchannelmixer=aa=#{opacity}" if opacity < 1.0
+    filter += "[#{input_label}]"
+    @filters << filter
+
+    x = position_x(element.fetch("x", "center"))
+    y = waveform_y(element, waveform_width, waveform_height)
+    @filters << "[#{@current_video_label}][#{input_label}]overlay=x='#{x}':y='#{y}':enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
+    @current_video_label = output_label
+  end
+
+  def waveform_y(element, waveform_width, waveform_height)
+    return position_y(element["y"]) if element.key?("y")
+
+    position = element.fetch("position", "bottom").to_s
+    anchor_y = number(element.fetch("anchor_y", 560))
+    anchor_height = number(element.fetch("anchor_height", element.fetch("anchor_width", waveform_width)))
+    gap = number(element.fetch("gap", 44))
+
+    case position
+    when "bottom", "below"
+      (anchor_y + anchor_height + gap).round(3).to_s
+    when "above", "top"
+      (anchor_y - waveform_height - gap).round(3).to_s
+    else
+      raise ArgumentError, "Unsupported waveform position: #{position.inspect}. Use bottom or above."
+    end
   end
 
   def build_output_command
@@ -587,6 +654,8 @@ end
 
 options = {
   dry_run: false,
+  render: true,
+  explicit: {},
   icon_style: IconSearch::DEFAULT_STYLE,
   icon_source: IconSearch::DEFAULT_SOURCE,
   icon_license_type: IconSearch::DEFAULT_LICENSE_TYPE,
@@ -605,23 +674,54 @@ parser = OptionParser.new do |opts|
   opts.on("--dry-run", "Print the FFmpeg command without executing it") do
     options[:dry_run] = true
   end
+  opts.on("--prepare-only", "--no-render", "--until-icons", "Generate project assets and config without rendering video") do
+    options[:render] = false
+  end
   opts.on("--icon-search KEYWORD", "Search Iconify icons by keyword and print JSON results") do |keyword|
     options[:icon_search_keyword] = keyword
   end
   opts.on("--icon-style STYLE", "Icon style preference, default: #{IconSearch::DEFAULT_STYLE}") do |style|
     options[:icon_style] = style
+    options[:explicit][:icon_style] = true
   end
   opts.on("--icon-source SOURCE", "Iconify source prefix, default: #{IconSearch::DEFAULT_SOURCE}") do |source|
     options[:icon_source] = source
+    options[:explicit][:icon_source] = true
   end
   opts.on("--icon-license-type TYPE", "Icon license type, default: #{IconSearch::DEFAULT_LICENSE_TYPE}") do |license_type|
     options[:icon_license_type] = license_type
+    options[:explicit][:icon_license_type] = true
   end
   opts.on("--icon-size PIXELS", Integer, "Icon asset size in pixels, default: #{IconSearch::DEFAULT_SIZE}") do |size|
     options[:icon_size] = size
+    options[:explicit][:icon_size] = true
   end
   opts.on("--icon-limit COUNT", Integer, "Maximum icon search results, default: #{IconSearch::DEFAULT_LIMIT}") do |limit|
     options[:icon_limit] = limit
+  end
+  opts.on("--rebuild-project PROJECT_DIR", "Rebuild an existing generated project from edited icon_plan.json without icon search") do |project_dir|
+    options[:rebuild_project_dir] = project_dir
+  end
+  opts.on("--rebuild-workspace DIR", "Rebuild every project listed in a workspace bulk_manifest.json") do |dir|
+    options[:rebuild_workspace_dir] = dir
+  end
+  opts.on("--bulk-workspace DIR", "Generate multiple videos from one workspace directory") do |dir|
+    options[:bulk_workspace_dir] = dir
+  end
+  opts.on("--bulk-scripts FILE", "Bulk script file, default: scripts.txt in the workspace") do |file|
+    options[:bulk_scripts_file] = file
+  end
+  opts.on("--background-color COLOR", "Generated video background color, default: #FFC067") do |color|
+    options[:background_color] = color
+    options[:explicit][:background_color] = true
+  end
+  opts.on("--background-image SOURCE", "Generated video image background path or URL") do |source|
+    options[:background_image] = source
+    options[:explicit][:background_image] = true
+  end
+  opts.on("--background-video SOURCE", "Generated video background path or URL") do |source|
+    options[:background_video] = source
+    options[:explicit][:background_video] = true
   end
   opts.on("--kokoro-speak TEXT", "Generate narration audio with local Kokoro text") do |text|
     options[:kokoro_text] = text
@@ -631,33 +731,41 @@ parser = OptionParser.new do |opts|
   end
   opts.on("--kokoro-voice VOICE", "Kokoro voice, default: #{KokoroTTS::DEFAULT_VOICE}") do |voice|
     options[:kokoro_voice] = voice
+    options[:explicit][:kokoro_voice] = true
   end
   opts.on("--kokoro-speed SPEED", Float, "Kokoro speed, default: #{KokoroTTS::DEFAULT_SPEED}") do |speed|
     options[:kokoro_speed] = speed
+    options[:explicit][:kokoro_speed] = true
   end
   opts.on("--kokoro-lang-code CODE", "Kokoro language code, default: #{KokoroTTS::DEFAULT_LANG_CODE}") do |lang_code|
     options[:kokoro_lang_code] = lang_code
+    options[:explicit][:kokoro_lang_code] = true
   end
   opts.on("--whisper-transcribe AUDIO_FILE", "Transcribe an audio file with OpenAI Whisper") do |file|
     options[:whisper_audio_file] = file
   end
   opts.on("--whisper-model MODEL", "Local Whisper model, default: #{options.fetch(:whisper_model)}") do |model|
     options[:whisper_model] = model
+    options[:explicit][:whisper_model] = true
   end
   opts.on("--whisper-output-format FORMAT", "Whisper output format, default: #{OpenAIWhisper::DEFAULT_OUTPUT_FORMAT}") do |format|
     options[:whisper_output_format] = format
   end
   opts.on("--whisper-task TASK", "Whisper task, default: #{OpenAIWhisper::DEFAULT_TASK}") do |task|
     options[:whisper_task] = task
+    options[:explicit][:whisper_task] = true
   end
   opts.on("--[no-]whisper-word-timestamps", "Enable word timestamps for sentence timing, default: enabled") do |word_timestamps|
     options[:whisper_word_timestamps] = word_timestamps
+    options[:explicit][:whisper_word_timestamps] = true
   end
   opts.on("--whisper-language LANGUAGE", "Optional input language hint, such as en or id") do |language|
     options[:whisper_language] = language
+    options[:explicit][:whisper_language] = true
   end
   opts.on("--whisper-prompt PROMPT", "Optional prompt to guide transcription style or vocabulary") do |prompt|
     options[:whisper_prompt] = prompt
+    options[:explicit][:whisper_prompt] = true
   end
   opts.on("-h", "--help", "Show help") do
     puts opts
@@ -666,6 +774,251 @@ parser = OptionParser.new do |opts|
 end
 
 parser.parse!
+
+def url?(value)
+  uri = URI.parse(value.to_s)
+  uri.is_a?(URI::HTTP) && !uri.host.to_s.empty?
+rescue URI::InvalidURIError
+  false
+end
+
+def media_background(type, source)
+  if url?(source)
+    { "type" => type, "url" => source }
+  else
+    { "type" => type, "path" => File.expand_path(source.to_s) }
+  end
+end
+
+def cli_background(options)
+  selected = %i[background_color background_image background_video].select { |key| options[key] }
+  raise ArgumentError, "Use only one background option: --background-color, --background-image, or --background-video." if selected.length > 1
+
+  if options[:background_color]
+    { "type" => "color", "color" => options.fetch(:background_color) }
+  elsif options[:background_image]
+    media_background("image", options.fetch(:background_image))
+  elsif options[:background_video]
+    media_background("video", options.fetch(:background_video))
+  end
+end
+
+def load_workspace_config(workspace_dir)
+  config_file = File.join(File.expand_path(workspace_dir.to_s), "config.json")
+  return {} unless File.file?(config_file)
+
+  JSON.parse(File.read(config_file))
+rescue JSON::ParserError => e
+  raise ArgumentError, "Invalid workspace config JSON: #{config_file}: #{e.message}"
+end
+
+def normalize_background_config(background, base_dir)
+  return nil unless background.is_a?(Hash)
+
+  config = background.transform_keys(&:to_s)
+  type = config.fetch("type", "color")
+  return { "type" => "color", "color" => config.fetch("color", "#FFC067") } if type == "color"
+
+  source = config["url"] || config["path"] || config["file"]
+  raise ArgumentError, "Workspace background #{type.inspect} requires url, path, or file" if source.to_s.empty?
+
+  if url?(source)
+    { "type" => type, "url" => source }
+  else
+    path = File.expand_path(source.to_s, base_dir || Dir.pwd)
+    key = config.key?("file") && !config.key?("path") ? "file" : "path"
+    { "type" => type, key => path }
+  end
+end
+
+def workspace_pipeline_options(config, base_dir)
+  config = config.transform_keys(&:to_s)
+  payload = {}
+
+  if (video = config["video"]).is_a?(Hash)
+    video = video.transform_keys(&:to_s)
+    payload[:width] = video["width"] if video.key?("width")
+    payload[:height] = video["height"] if video.key?("height")
+    payload[:fps] = video["fps"] if video.key?("fps")
+  end
+
+  if (background = normalize_background_config(config["background"], base_dir))
+    payload[:background] = background
+  end
+
+  if (icon = config["icon"]).is_a?(Hash)
+    icon = icon.transform_keys(&:to_s)
+    payload[:icon_style] = icon["style"] if icon.key?("style")
+    payload[:icon_source] = icon["source_url"] if icon.key?("source_url")
+    payload[:icon_source] = icon["source"] if icon.key?("source")
+    payload[:icon_license_type] = icon["license_type"] if icon.key?("license_type")
+    payload[:icon_size] = icon["size"] if icon.key?("size")
+    payload[:icon_candidate_limit] = icon["candidate_limit"] if icon.key?("candidate_limit")
+  end
+
+  if (kokoro = config["kokoro"]).is_a?(Hash)
+    kokoro = kokoro.transform_keys(&:to_s)
+    payload[:kokoro_voice] = kokoro["voice"] if kokoro.key?("voice")
+    payload[:kokoro_speed] = kokoro["speed"] if kokoro.key?("speed")
+    payload[:kokoro_lang_code] = kokoro["lang_code"] if kokoro.key?("lang_code")
+  end
+
+  if (whisper = config["whisper"]).is_a?(Hash)
+    whisper = whisper.transform_keys(&:to_s)
+    payload[:whisper_model] = whisper["model"] if whisper.key?("model")
+    payload[:whisper_task] = whisper["task"] if whisper.key?("task")
+    payload[:whisper_word_timestamps] = whisper["word_timestamps"] if whisper.key?("word_timestamps")
+    payload[:whisper_language] = whisper["language"] if whisper.key?("language")
+    payload[:whisper_prompt] = whisper["prompt"] if whisper.key?("prompt")
+  end
+
+  if (pipeline = config["pipeline"]).is_a?(Hash)
+    pipeline = pipeline.transform_keys(&:to_s)
+    payload[:pipeline_waveform] = pipeline["waveform"] if pipeline.key?("waveform")
+    payload[:pipeline_icon_width] = pipeline["icon_width"] if pipeline.key?("icon_width")
+  end
+
+  payload
+end
+
+def explicit_pipeline_options(options)
+  explicit = options.fetch(:explicit)
+  mapping = {
+    icon_style: :icon_style,
+    icon_source: :icon_source,
+    icon_license_type: :icon_license_type,
+    icon_size: :icon_size,
+    kokoro_voice: :kokoro_voice,
+    kokoro_speed: :kokoro_speed,
+    kokoro_lang_code: :kokoro_lang_code,
+    whisper_model: :whisper_model,
+    whisper_task: :whisper_task,
+    whisper_word_timestamps: :whisper_word_timestamps,
+    whisper_language: :whisper_language,
+    whisper_prompt: :whisper_prompt
+  }
+
+  mapping.each_with_object({}) do |(option_key, pipeline_key), payload|
+    payload[pipeline_key] = options[option_key] if explicit[option_key]
+  end
+end
+
+def pipeline_options(options, workspace_config: {}, config_base_dir: nil)
+  background = cli_background(options)
+  payload = {
+    icon_style: options.fetch(:icon_style),
+    icon_source: options.fetch(:icon_source),
+    icon_license_type: options.fetch(:icon_license_type),
+    icon_size: options.fetch(:icon_size),
+    kokoro_voice: options.fetch(:kokoro_voice),
+    kokoro_speed: options.fetch(:kokoro_speed),
+    kokoro_lang_code: options.fetch(:kokoro_lang_code),
+    whisper_model: options.fetch(:whisper_model),
+    whisper_task: options.fetch(:whisper_task),
+    whisper_word_timestamps: options.fetch(:whisper_word_timestamps),
+    whisper_language: options[:whisper_language],
+    whisper_prompt: options[:whisper_prompt]
+  }
+  payload.merge!(workspace_pipeline_options(workspace_config, config_base_dir)) unless workspace_config.empty?
+  payload.merge!(explicit_pipeline_options(options))
+  payload[:background] = background if background
+  payload
+end
+
+def rebuild_options(options, workspace_config: {}, config_base_dir: nil)
+  payload = pipeline_options(options, workspace_config: workspace_config, config_base_dir: config_base_dir)
+  payload.select do |key, _value|
+    %i[
+      width height fps background
+      icon_license_type icon_size
+      pipeline_waveform pipeline_icon_width
+    ].include?(key)
+  end
+end
+
+def bulk_manifest_project_dirs(workspace_dir)
+  workspace_dir = File.expand_path(workspace_dir.to_s)
+  manifest_file = File.join(workspace_dir, "bulk_manifest.json")
+  raise ArgumentError, "Bulk manifest not found: #{manifest_file}. Run --bulk-workspace first." unless File.file?(manifest_file)
+
+  manifest = JSON.parse(File.read(manifest_file))
+  videos = manifest.fetch("videos")
+  project_dirs = videos.map { |video| video.fetch("project_dir") }.map { |dir| File.expand_path(dir.to_s) }.uniq
+  raise ArgumentError, "No project directories found in #{manifest_file}" if project_dirs.empty?
+
+  project_dirs
+rescue JSON::ParserError => e
+  raise ArgumentError, "Invalid bulk manifest JSON: #{manifest_file}: #{e.message}"
+end
+
+def render_pipeline_if_requested(pipeline, options)
+  return unless options.fetch(:render)
+
+  FFmpegVideoBuilder.call(config_path: pipeline.config_file, dry_run: options[:dry_run])
+  move_rendered_output!(pipeline) unless options[:dry_run]
+end
+
+def move_rendered_output!(pipeline, outputs_dir: "outputs")
+  source = pipeline.output_file.to_s
+  return unless File.file?(source)
+
+  destination_dir = File.expand_path(outputs_dir)
+  FileUtils.mkdir_p(destination_dir)
+  destination = File.join(destination_dir, File.basename(source))
+  FileUtils.rm_f(destination)
+  FileUtils.mv(source, destination)
+  pipeline.output_file = destination
+  update_project_output_metadata!(pipeline, destination)
+  destination
+end
+
+def update_project_output_metadata!(pipeline, output_file)
+  metadata_file = File.join(pipeline.project_dir, "pipeline_metadata.json")
+  return unless File.file?(metadata_file)
+
+  metadata = JSON.parse(File.read(metadata_file))
+  metadata["output_file"] = output_file
+  File.write(metadata_file, "#{JSON.pretty_generate(metadata)}\n")
+rescue JSON::ParserError
+  warn "Warning: could not update invalid metadata JSON: #{metadata_file}"
+end
+
+def update_bulk_manifest_outputs!(workspace_dir, pipelines)
+  manifest_file = File.join(File.expand_path(workspace_dir.to_s), "bulk_manifest.json")
+  return unless File.file?(manifest_file)
+
+  manifest = JSON.parse(File.read(manifest_file))
+  outputs_by_project = pipelines.each_with_object({}) do |pipeline, mapping|
+    mapping[File.expand_path(pipeline.project_dir)] = pipeline.output_file
+  end
+  manifest["videos"] = manifest.fetch("videos", []).map do |video|
+    project_dir = File.expand_path(video.fetch("project_dir"))
+    outputs_by_project[project_dir] ? video.merge("output_file" => outputs_by_project.fetch(project_dir)) : video
+  end
+  File.write(manifest_file, "#{JSON.pretty_generate(manifest)}\n")
+rescue JSON::ParserError
+  warn "Warning: could not update invalid bulk manifest JSON: #{manifest_file}"
+end
+
+def config_output_file(config_path)
+  config = JSON.parse(File.read(config_path))
+  output = config.fetch("output", FFmpegVideoBuilder::DEFAULTS.fetch("output"))
+  File.expand_path(output.to_s, File.dirname(File.expand_path(config_path)))
+end
+
+def render_config_and_move_output(config_path, options)
+  FFmpegVideoBuilder.call(config_path: config_path, dry_run: options[:dry_run])
+  return if options[:dry_run]
+
+  source = config_output_file(config_path)
+  return unless File.file?(source)
+
+  destination_dir = File.expand_path("outputs")
+  FileUtils.mkdir_p(destination_dir)
+  destination = File.join(destination_dir, File.basename(source))
+  FileUtils.rm_f(destination)
+  FileUtils.mv(source, destination)
+end
 
 begin
   if options[:icon_search_keyword]
@@ -707,6 +1060,49 @@ begin
     exit 0
   end
 
+  if options[:rebuild_project_dir]
+    pipeline = ScriptVideoPipeline.rebuild(
+      project_dir: options.fetch(:rebuild_project_dir),
+      options: rebuild_options(options)
+    )
+    puts JSON.pretty_generate(pipeline.to_h)
+    render_pipeline_if_requested(pipeline, options)
+    exit 0
+  end
+
+  if options[:rebuild_workspace_dir]
+    workspace_dir = options.fetch(:rebuild_workspace_dir)
+    workspace_config = load_workspace_config(workspace_dir)
+    pipelines = bulk_manifest_project_dirs(workspace_dir).map do |project_dir|
+      ScriptVideoPipeline.rebuild(
+        project_dir: project_dir,
+        options: rebuild_options(options, workspace_config: workspace_config, config_base_dir: workspace_dir)
+      )
+    end
+    puts JSON.pretty_generate(pipelines.map(&:to_h))
+    pipelines.each do |pipeline|
+      render_pipeline_if_requested(pipeline, options)
+    end
+    update_bulk_manifest_outputs!(workspace_dir, pipelines) if options.fetch(:render) && !options[:dry_run]
+    exit 0
+  end
+
+  if options[:bulk_workspace_dir]
+    workspace_dir = options.fetch(:bulk_workspace_dir)
+    workspace_config = load_workspace_config(workspace_dir)
+    pipelines = ScriptVideoPipeline.prepare_bulk(
+      workspace_dir: workspace_dir,
+      scripts_file: options[:bulk_scripts_file],
+      options: pipeline_options(options, workspace_config: workspace_config, config_base_dir: workspace_dir)
+    )
+    puts JSON.pretty_generate(pipelines.map(&:to_h))
+    pipelines.each do |pipeline|
+      render_pipeline_if_requested(pipeline, options)
+    end
+    update_bulk_manifest_outputs!(workspace_dir, pipelines) if options.fetch(:render) && !options[:dry_run]
+    exit 0
+  end
+
   input_path = ARGV.first
 
   unless input_path
@@ -715,27 +1111,16 @@ begin
   end
 
   if File.extname(input_path).downcase == ".json"
-    FFmpegVideoBuilder.call(config_path: input_path, dry_run: options[:dry_run])
+    render_config_and_move_output(input_path, options)
   else
+    script_dir = File.dirname(File.expand_path(input_path))
+    workspace_config = load_workspace_config(script_dir)
     pipeline = ScriptVideoPipeline.prepare(
       script_file: input_path,
-      options: {
-        icon_style: options.fetch(:icon_style),
-        icon_source: options.fetch(:icon_source),
-        icon_license_type: options.fetch(:icon_license_type),
-        icon_size: options.fetch(:icon_size),
-        kokoro_voice: options.fetch(:kokoro_voice),
-        kokoro_speed: options.fetch(:kokoro_speed),
-        kokoro_lang_code: options.fetch(:kokoro_lang_code),
-        whisper_model: options.fetch(:whisper_model),
-        whisper_task: options.fetch(:whisper_task),
-        whisper_word_timestamps: options.fetch(:whisper_word_timestamps),
-        whisper_language: options[:whisper_language],
-        whisper_prompt: options[:whisper_prompt]
-      }
+      options: pipeline_options(options, workspace_config: workspace_config, config_base_dir: script_dir)
     )
     puts JSON.pretty_generate(pipeline.to_h)
-    FFmpegVideoBuilder.call(config_path: pipeline.config_file, dry_run: options[:dry_run])
+    render_pipeline_if_requested(pipeline, options)
   end
 rescue StandardError => e
   warn "Error: #{e.message}"

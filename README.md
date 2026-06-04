@@ -12,6 +12,7 @@ It is designed for icon-based videos, captions, simple transitions, voiceovers, 
 - Solid color, image, or video background
 - Icon/image overlays
 - Text captions
+- Audio waveform overlays
 - Rectangle overlays for panels/highlights
 - Basic animations:
   - `fade`
@@ -64,6 +65,121 @@ Dry-run only:
 bin/ffmpeg_video_builder --dry-run script.txt
 ```
 
+## Workflow modes
+
+| Mode | Single script | Workspace bulk |
+|---|---|---|
+| Prepare project assets only | `bin/ffmpeg_video_builder --until-icons script.txt` | `bin/ffmpeg_video_builder --bulk-workspace workspace --until-icons` |
+| Prepare assets and render video | `bin/ffmpeg_video_builder script.txt` | `bin/ffmpeg_video_builder --bulk-workspace workspace` |
+| Regenerate after editing icons | `bin/ffmpeg_video_builder --rebuild-project projects/Project_1_02062026` | `bin/ffmpeg_video_builder --rebuild-workspace workspace` |
+
+Create the project structure, narration, subtitles, downloaded icons, icon plan,
+and generated FFmpeg config without rendering the MP4:
+
+```bash
+bin/ffmpeg_video_builder --prepare-only script.txt
+bin/ffmpeg_video_builder --until-icons script.txt
+```
+
+Generate multiple videos from one workspace:
+
+```bash
+bin/ffmpeg_video_builder --bulk-workspace workspace
+```
+
+Prepare every script in a workspace without rendering the videos:
+
+```bash
+bin/ffmpeg_video_builder --bulk-workspace workspace --prepare-only
+bin/ffmpeg_video_builder --bulk-workspace workspace --until-icons
+```
+
+By default, the bulk command reads `workspace/scripts.txt`. Put repeated script
+blocks in that file:
+
+```text
+Title: First Video
+Category: Financial Advice
+
+Content:
+First video script text.
+
+Title: Second Video
+Category: Financial Advice
+
+Content:
+Second video script text.
+```
+
+Workspace generation also reads `workspace/config.json` when it exists. Values
+in that file override built-in defaults, and command-line flags override
+`config.json`.
+
+```json
+{
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30
+  },
+  "background": {
+    "type": "image",
+    "path": "background.png"
+  },
+  "icon": {
+    "source_url": "https://icon-sets.iconify.design/noto-v1",
+    "style": "regular",
+    "license_type": "permissive",
+    "size": 512,
+    "candidate_limit": 8
+  },
+  "pipeline": {
+    "waveform": true,
+    "icon_width": 320
+  },
+  "kokoro": {
+    "voice": "af_heart",
+    "speed": 1.0,
+    "lang_code": "a"
+  },
+  "whisper": {
+    "model": "base",
+    "task": "transcribe",
+    "word_timestamps": true
+  }
+}
+```
+
+If the workspace contains one background media file, or a file named
+`background.png`, `background.jpg`, `background.mp4`, and so on, that media is
+used as the background for every generated video. If no background media exists,
+the default solid `#FFC067` background is used. You can also set the background
+explicitly:
+
+```bash
+bin/ffmpeg_video_builder --bulk-workspace workspace --background-color "#FFC067"
+bin/ffmpeg_video_builder --bulk-workspace workspace --background-image workspace/background.png
+bin/ffmpeg_video_builder --bulk-workspace workspace --background-video workspace/background.mp4
+bin/ffmpeg_video_builder --bulk-workspace workspace --background-image "https://example.com/background.jpg"
+```
+
+The bulk command writes a `bulk_manifest.json` file into the workspace with the
+generated project paths and output video files.
+
+After editing the `icon_plan.json` files in projects created from a workspace,
+regenerate every project listed in `workspace/bulk_manifest.json`:
+
+```bash
+bin/ffmpeg_video_builder --rebuild-workspace workspace
+```
+
+To refresh icon downloads and configs for every listed project without rendering
+MP4 files, combine it with `--until-icons`:
+
+```bash
+bin/ffmpeg_video_builder --rebuild-workspace workspace --until-icons
+```
+
 The main input is a text script. The full pipeline:
 
 1. Generate narration audio with local Kokoro.
@@ -74,10 +190,16 @@ The main input is a text script. The full pipeline:
 
 Generated assets are written into `projects/Project_INTEGER_SEQUENCE_DDMMYYYY/`, including
 `script_input.txt`, `audio_voiceover.wav`, `subtitle_sentences.json`, `subtitle_sentences.srt`,
-`icon_plan.json`, `config_project.json`, and `video_output.mp4`.
+`icon_plan.json`, `config_project.json`, and `DDMMYYYY_TitleOfTheVideo.mp4`.
+
+After a video render completes successfully, the final MP4 is moved into
+`outputs/`. The project's `pipeline_metadata.json` is updated with the moved
+output path. For bulk workspace runs, `workspace/bulk_manifest.json` is also
+updated with the moved output paths.
 
 For example, the first project created on June 2, 2026 is written to
-`projects/Project_1_02062026/`.
+`projects/Project_1_02062026/`, and a script titled `My Video Title` renders to
+`outputs/02062026_MyVideoTitle.mp4`.
 
 Manual JSON project configs are still supported:
 
@@ -99,6 +221,32 @@ projects/Project_INTEGER_SEQUENCE_DDMMYYYY/
 
 The command also writes `icon_metadata.json` in that directory with the selected icon
 IDs, licenses, source URLs, and local file paths.
+
+Rebuild a generated project after editing `icon_plan.json`:
+
+```bash
+bin/ffmpeg_video_builder --rebuild-project projects/Project_1_02062026
+```
+
+The value is the generated project directory path, using the
+`Project_SEQUENCE_DDMMYYYY` folder name:
+
+```bash
+bin/ffmpeg_video_builder --rebuild-project projects/Project_1_03062026
+bin/ffmpeg_video_builder --rebuild-project projects/Project_42_03062026
+```
+
+For a bulk workspace, rebuild every project listed in the workspace manifest:
+
+```bash
+bin/ffmpeg_video_builder --rebuild-workspace workspace
+```
+
+This skips keyword icon search. Edit each entry's `icon_id` in `icon_plan.json`
+to the exact Iconify ID you want, such as `fluent:money-24-regular`; the rebuild
+downloads those exact icons, updates `icon_file`, regenerates `config_project.json`,
+and renders the video again. Duplicate `icon_id` values are rejected so each icon
+stays different within the project.
 
 Generate narration audio with local Kokoro:
 
@@ -246,10 +394,12 @@ WHISPER_COMMAND=/full/path/to/whisper bin/ffmpeg_video_builder --whisper-transcr
 {
   "background": {
     "type": "color",
-    "color": "#111827"
+    "color": "#FFC067"
   }
 }
 ```
+
+If `background` is omitted, the default is a solid `#FFC067` color.
 
 ### Image background
 
@@ -257,7 +407,18 @@ WHISPER_COMMAND=/full/path/to/whisper bin/ffmpeg_video_builder --whisper-transcr
 {
   "background": {
     "type": "image",
-    "file": "background.jpg"
+    "path": "background.jpg"
+  }
+}
+```
+
+You can also use `file` for local paths, or `url` for remote media:
+
+```json
+{
+  "background": {
+    "type": "image",
+    "url": "https://example.com/background.jpg"
   }
 }
 ```
@@ -268,10 +429,12 @@ WHISPER_COMMAND=/full/path/to/whisper bin/ffmpeg_video_builder --whisper-transcr
 {
   "background": {
     "type": "video",
-    "file": "background.mp4"
+    "path": "background.mp4"
   }
 }
 ```
+
+Video backgrounds also support `file`, `path`, or `url`.
 
 ## Element types
 
@@ -321,6 +484,26 @@ Supported icon search source options:
 - `material-symbols-light` - Material Symbols Light, Apache 2.0
 - `material-symbols` - Material Symbols, Apache 2.0
 - `arcticons` - Arcticons, CC BY-SA 4.0
+- `noto-v1` - Noto Emoji (v1), Apache 2.0
+
+Icon source can be configured with either the Iconify prefix or a full Iconify
+icon-set URL:
+
+```json
+{
+  "icon": {
+    "source": "noto-v1",
+    "source_url": "https://icon-sets.iconify.design/noto-v1"
+  }
+}
+```
+
+The CLI also accepts either form:
+
+```bash
+bin/ffmpeg_video_builder --icon-source noto-v1 --icon-search "money"
+bin/ffmpeg_video_builder --icon-source https://icon-sets.iconify.design/noto-v1 --icon-search "money"
+```
 
 Required icon search parameter:
 
@@ -347,6 +530,28 @@ Supported `license_type` values:
 
 The `bold` style preference also matches `filled` icons because Fluent UI System
 Icons uses filled variants instead of a bold variant.
+
+### Audio waveform
+
+```json
+{
+  "type": "waveform",
+  "audio": "voiceover.mp3",
+  "start": 0,
+  "end": 8,
+  "width": 320,
+  "height": 64,
+  "x": "center",
+  "position": "bottom",
+  "color": "0x111111",
+  "opacity": 0.72
+}
+```
+
+Script-generated videos include a small waveform below the icon by default. Set
+`position` to `bottom` to place it below the icon, or `above` to place it above
+the icon. In manual JSON configs, omit `audio` to reuse the root `audio` file.
+You can still set `y` directly when you need an exact vertical position.
 
 ### Rectangle
 
@@ -419,5 +624,4 @@ git push -u origin main
 - Scene templates
 - Ken Burns background animation
 - Per-word caption highlighting
-- Audio waveform visualization
 - Auto-generated project JSON from a script outline
