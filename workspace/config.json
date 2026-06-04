@@ -1,0 +1,32 @@
+{
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30
+  },
+  "background": {
+    "type": "image",
+    "path": "background.png"
+  },
+  "icon": {
+    "source_url": "https://icon-sets.iconify.design/noto-v1",
+    "style": "regular",
+    "license_type": "permissive",
+    "size": 512,
+    "candidate_limit": 8
+  },
+  "pipeline": {
+    "waveform": true,
+    "icon_width": 320
+  },
+  "kokoro": {
+    "voice": "af_heart",
+    "speed": 1.0,
+    "lang_code": "a"
+  },
+  "whisper": {
+    "model": "base",
+    "task": "transcribe",
+    "word_timestamps": true
+  }
+}
