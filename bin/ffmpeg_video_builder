@@ -8,6 +8,7 @@ require "optparse"
 require "shellwords"
 require "English"
 require "uri"
+require "tempfile"
 require_relative "../lib/icon_search"
 require_relative "../lib/kokoro_tts"
 require_relative "../lib/openai_whisper"
@@ -161,6 +162,7 @@ class FFmpegVideoBuilder
     persist = truthy?(element.fetch("persist", false))
     hold = truthy?(element.fetch("hold", persist))
     remove_background = truthy?(element.fetch("remove_background", image.fetch(:remove_background)))
+    preserve_alpha = truthy?(element.fetch("preserve_alpha", image.fetch(:preserve_alpha, false)))
 
     input_label = "img#{index}"
     output_label = "v#{index}"
@@ -171,7 +173,7 @@ class FFmpegVideoBuilder
     filter += transparent_background_filter if remove_background
     filter += image_transform_filter(animation, width, start_time)
     filter += ",colorchannelmixer=aa=#{opacity}" if opacity < 1.0
-    filter += image_fade_filter(animation, start_time, end_time, hold: hold)
+    filter += image_fade_filter(animation, start_time, end_time, hold: hold, preserve_alpha: preserve_alpha)
     filter += "[#{input_label}]"
     @filters << filter
 
@@ -185,6 +187,11 @@ class FFmpegVideoBuilder
   end
 
   def add_text_element(element, index)
+    if ubuntu_environment? && element.fetch("text").to_s.include?("\n")
+      add_text_image_element(element, index)
+      return
+    end
+
     unless ffmpeg_filter_available?("drawtext")
       warn_missing_drawtext
       add_text_image_element(element, index)
@@ -220,16 +227,26 @@ class FFmpegVideoBuilder
     start_time = number(element.fetch("start", 0))
     end_time = number(element.fetch("end", @duration))
     text_file = write_text_svg(element, index)
+    render_width = if ubuntu_environment?
+                     integer(element.fetch("fallback_render_width", element.fetch("fallback_canvas_width", element.fetch("fallback_width", 1000))))
+                   else
+                     integer(element.fetch("fallback_width", 1000))
+                   end
+    render_scale = ubuntu_environment? ? number(element.fetch("fallback_render_scale", 1.1)) : 1.0
+    y = element.fetch("y", @height - 500)
+    y = number(y) - 166 if ubuntu_environment? && element.key?("paragraph_index")
+
     fallback = {
       "type" => "image",
       "file" => text_file,
       "start" => start_time,
       "end" => end_time,
-      "width" => integer(element.fetch("fallback_width", 1000)),
+      "width" => (render_width * render_scale).round,
       "x" => element.fetch("x", "center"),
-      "y" => element.fetch("y", @height - 500),
+      "y" => y,
       "animation" => "none",
       "remove_background" => true,
+      "preserve_alpha" => false,
       "rasterize_size" => integer(element.fetch("fallback_rasterize_size", 640))
     }
 
@@ -339,17 +356,19 @@ class FFmpegVideoBuilder
     end
   end
 
-  def image_fade_filter(animation, start_time, end_time, hold: false)
+  def image_fade_filter(animation, start_time, end_time, hold: false, preserve_alpha: false)
     case animation
     when "none"
       ""
     when *supported_image_animations
+      return "" if preserve_alpha
       return ",fade=t=in:st=#{start_time}:d=0.25:alpha=1" if hold
 
       fade_out_start = [end_time - 0.25, start_time].max
       ",fade=t=in:st=#{start_time}:d=0.25:alpha=1,fade=t=out:st=#{fade_out_start}:d=0.25:alpha=1"
     else
       warn "Unknown animation '#{animation}', using fade"
+      return "" if preserve_alpha
       return ",fade=t=in:st=#{start_time}:d=0.25:alpha=1" if hold
 
       fade_out_start = [end_time - 0.25, start_time].max
@@ -465,10 +484,15 @@ class FFmpegVideoBuilder
   end
 
   def prepare_image_file(file, rasterize_size: nil)
-    return { file: file, remove_background: false } unless File.extname(file).downcase == ".svg"
-    return { file: file, remove_background: false } if ffmpeg_decoder_available?("svg")
+    return { file: file, remove_background: false, preserve_alpha: false } unless File.extname(file).downcase == ".svg"
 
-    { file: rasterize_svg!(file, size: rasterize_size), remove_background: true }
+    return { file: file, remove_background: false, preserve_alpha: false } if !ubuntu_environment? && ffmpeg_decoder_available?("svg")
+
+    if ubuntu_environment?
+      { file: rasterize_svg!(file, size: rasterize_size), remove_background: false, preserve_alpha: true }
+    else
+      { file: rasterize_svg!(file, size: rasterize_size), remove_background: true, preserve_alpha: false }
+    end
   end
 
   def transparent_background_filter
@@ -482,11 +506,36 @@ class FFmpegVideoBuilder
 
   def rasterize_svg!(file, size: nil)
     target = file.sub(/\.svg\z/i, ".png")
-    return target if File.file?(target)
+    return target if File.file?(target) && !ubuntu_environment?
+
+    FileUtils.rm_f(target)
+
+    if ubuntu_environment? && executable_in_path?("ffmpeg") && ffmpeg_decoder_available?("librsvg")
+      normalized_svg_file(file) do |svg_file|
+        command = ["ffmpeg", "-y", "-i", svg_file, "-frames:v", "1", target]
+        ok = system(*command, out: File::NULL, err: File::NULL)
+        return target if ok && File.file?(target)
+      end
+    end
+
+    image_magick = ubuntu_environment? && %w[magick convert].find { |command| executable_in_path?(command) }
+    if image_magick
+      normalized_svg_file(file) do |svg_file|
+        command = [
+          image_magick,
+          "-background", "none",
+          svg_file,
+          "-resize", "#{size || 512}x#{size || 512}",
+          "PNG32:#{target}"
+        ]
+        ok = system(*command, out: File::NULL, err: File::NULL)
+        return target if ok && File.file?(target)
+      end
+    end
 
     qlmanage = "/usr/bin/qlmanage"
     unless File.executable?(qlmanage)
-      raise "FFmpeg cannot decode SVG image input: #{file}. Install an FFmpeg build with SVG support or use PNG image assets."
+      raise "Could not rasterize SVG image input: #{file}. Install ImageMagick, librsvg, or an FFmpeg build with SVG support."
     end
 
     output_dir = File.dirname(file)
@@ -502,25 +551,45 @@ class FFmpegVideoBuilder
     target
   end
 
+  def normalized_svg_file(file)
+    svg = File.read(file, encoding: "UTF-8")
+              .gsub("currentColor", "black")
+              .sub(/<svg\b/i, '<svg color="black"')
+
+    Tempfile.create(["ffmpeg-video-builder-svg", ".svg"]) do |tempfile|
+      tempfile.write(svg)
+      tempfile.flush
+      yield tempfile.path
+    end
+  end
+
   def write_text_svg(element, index)
     dir = File.join(@base_dir, ".rendered_text")
     FileUtils.mkdir_p(dir)
     path = File.join(dir, "subtitle_#{format('%03d', index)}.svg")
     width = integer(element.fetch("fallback_canvas_width", 1080))
     font_size = integer(element.fetch("font_size", 54))
+    font_size = (font_size * 1.2).round if ubuntu_environment? && element.key?("paragraph_index")
     line_height = (font_size * 1.2).round
     lines = element.fetch("text").to_s.split("\n")
     text_align = element.fetch("text_align", "left")
+    font_weight = integer(element.fetch("font_weight", ubuntu_environment? && element.key?("paragraph_index") ? 900 : 700))
     height = [line_height * lines.length + 36, line_height + 36].max
     y = ((height - (line_height * lines.length)) / 2.0 + font_size).round
     color = svg_color(element.fetch("color", "black"))
 
-    File.write(path, text_svg(width: width, height: height, lines: lines, y: y, line_height: line_height, font_size: font_size, color: color, text_align: text_align))
+    File.write(path, text_svg(width: width, height: height, lines: lines, y: y, line_height: line_height, font_size: font_size, font_weight: font_weight, color: color, text_align: text_align))
     FileUtils.rm_f(path.sub(/\.svg\z/i, ".png"))
     path
   end
 
-  def text_svg(width:, height:, lines:, y:, line_height:, font_size:, color:, text_align:)
+  def executable_in_path?(command)
+    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |dir|
+      File.executable?(File.join(dir, command))
+    end
+  end
+
+  def text_svg(width:, height:, lines:, y:, line_height:, font_size:, font_weight:, color:, text_align:)
     text_lines = lines.each_with_index.map do |line, offset|
       text_x = svg_text_x(line, width, font_size, text_align)
       %(<text x="#{text_x}" y="#{y + (offset * line_height)}">#{escape_xml(line)}</text>)
@@ -529,7 +598,7 @@ class FFmpegVideoBuilder
     <<~SVG
       <svg xmlns="http://www.w3.org/2000/svg" width="#{width}" height="#{height}" viewBox="0 0 #{width} #{height}">
         <rect width="100%" height="100%" fill="white"/>
-        <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Arial, sans-serif" font-size="#{font_size}" font-weight="700" fill="#{color}">
+        <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Arial, sans-serif" font-size="#{font_size}" font-weight="#{font_weight}" fill="#{color}">
           #{text_lines}
         </g>
       </svg>
@@ -537,7 +606,7 @@ class FFmpegVideoBuilder
   end
 
   def svg_text_x(line, width, font_size, text_align)
-    return [font_size * 1.8, 72].max.round unless text_align.to_s == "center"
+    return [font_size * (ubuntu_environment? ? 2.8 : 1.8), 72].max.round unless text_align.to_s == "center"
 
     estimated_width = line.to_s.length * font_size * 0.58
     [((width - estimated_width) / 2.0).round, 0].max
@@ -554,6 +623,16 @@ class FFmpegVideoBuilder
 
   def svg_color(value)
     value.to_s.include?("@") ? value.to_s.split("@", 2).first : value.to_s
+  end
+
+  def ubuntu_environment?
+    @ubuntu_environment ||= begin
+      RUBY_PLATFORM.include?("linux") &&
+        File.file?("/etc/os-release") &&
+        File.read("/etc/os-release").match?(/^ID=ubuntu$/)
+    rescue StandardError
+      false
+    end
   end
 
   def ffmpeg_filter_available?(name)

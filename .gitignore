@@ -6,6 +6,7 @@
 *.mp3
 /vendor/bundle
 /.bundle
+/.venv
 /downloads/
 /projects/
 /kokoro-test/
