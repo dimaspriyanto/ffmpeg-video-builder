@@ -50,6 +50,9 @@ Kokoro installation is intentionally not handled by this bundle. The local
 helper script lives at `bin/kokoro-tts`; set `KOKORO_PYTHON` if Kokoro is
 installed in a specific Python or virtualenv.
 
+Kokoro remains the default narration engine. Google AI TTS can be enabled from
+workspace config or with `--tts-engine google_ai`.
+
 ## Usage
 
 From the repository root:
@@ -150,6 +153,23 @@ in that file override built-in defaults, and command-line flags override
 }
 ```
 
+To use Google AI TTS for a workspace, add a `google_ai_tts` block. Its presence
+selects Google AI TTS instead of Kokoro:
+
+```json
+{
+  "google_ai_tts": {
+    "model": "gemini-3.1-flash-tts-preview",
+    "voice": "Zephyr",
+    "style": "Scene: Sincere calm night. Speaker style: Empathetic."
+  }
+}
+```
+
+If neither `google_ai_tts` nor `tts.engine` is configured, Kokoro is used.
+The engine can also be selected explicitly with `--tts-engine kokoro` or
+`--tts-engine google_ai`; CLI flags override `workspace/config.json`.
+
 If the workspace contains one background media file, or a file named
 `background.png`, `background.jpg`, `background.mp4`, and so on, that media is
 used as the background for every generated video. If no background media exists,
@@ -182,7 +202,7 @@ bin/ffmpeg_video_builder --rebuild-workspace workspace --until-icons
 
 The main input is a text script. The full pipeline:
 
-1. Generate narration audio with local Kokoro.
+1. Generate narration audio with Kokoro or Google AI TTS.
 2. Generate sentence timings and subtitles with local Whisper.
 3. Choose an icon keyword for each sentence.
 4. Search and download icons from Iconify.
@@ -200,6 +220,121 @@ updated with the moved output paths.
 For example, the first project created on June 2, 2026 is written to
 `projects/Project_1_02062026/`, and a script titled `My Video Title` renders to
 `outputs/02062026_MyVideoTitle.mp4`.
+
+## Google Drive upload
+
+Rendered files can be uploaded to Google Drive after generation. Use either an
+OAuth access token:
+
+```bash
+GOOGLE_DRIVE_ACCESS_TOKEN="ya29..." \
+  bin/ffmpeg_video_builder --google-drive-upload outputs/02062026_MyVideoTitle.mp4
+```
+
+Or use a service account JSON file:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-drive-credentials config/google-service-account.json \
+  --google-drive-folder-id "DRIVE_FOLDER_ID" \
+  --google-drive-upload outputs/02062026_MyVideoTitle.mp4
+```
+
+To upload every output listed in a workspace `bulk_manifest.json`:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-drive-credentials config/google-service-account.json \
+  --google-drive-folder-id "DRIVE_FOLDER_ID" \
+  --google-drive-upload-workspace workspace
+```
+
+## Facebook upload
+
+Rendered MP4 files can be uploaded to a Facebook Page through the Graph Video
+endpoint. Provide a Page ID and Page access token:
+
+```bash
+FACEBOOK_PAGE_ID="123456789" \
+FACEBOOK_ACCESS_TOKEN="EAAB..." \
+  bin/ffmpeg_video_builder --facebook-upload outputs/02062026_MyVideoTitle.mp4
+```
+
+Upload every output listed in a workspace manifest:
+
+```bash
+bin/ffmpeg_video_builder \
+  --facebook-page-id "123456789" \
+  --facebook-access-token "EAAB..." \
+  --facebook-upload-workspace workspace
+```
+
+Optional post metadata:
+
+```bash
+bin/ffmpeg_video_builder \
+  --facebook-upload outputs/02062026_MyVideoTitle.mp4 \
+  --facebook-title "Video title" \
+  --facebook-description "Video description" \
+  --facebook-unpublished
+```
+
+## TikTok upload
+
+Rendered MP4 files can also be uploaded to TikTok through the official Content
+Posting API. The default mode is inbox upload, which sends the video to the
+user's TikTok inbox/editing flow and requires a user token with `video.upload`.
+
+```bash
+TIKTOK_ACCESS_TOKEN="act..." \
+  bin/ffmpeg_video_builder --tiktok-upload outputs/02062026_MyVideoTitle.mp4
+```
+
+Upload every output listed in a workspace manifest:
+
+```bash
+bin/ffmpeg_video_builder \
+  --tiktok-access-token "act..." \
+  --tiktok-upload-workspace workspace
+```
+
+Direct post is available when your TikTok app and user token support
+`video.publish`:
+
+```bash
+bin/ffmpeg_video_builder \
+  --tiktok-access-token "act..." \
+  --tiktok-upload outputs/02062026_MyVideoTitle.mp4 \
+  --tiktok-direct-post \
+  --tiktok-title "Caption #fyp" \
+  --tiktok-privacy-level SELF_ONLY \
+  --tiktok-aigc
+```
+
+TikTok may restrict unaudited API clients to private visibility.
+
+## Google AI Studio speech generation
+
+The Google AI Studio speech UI is backed by Gemini API text-to-speech models.
+Use an API key from AI Studio through `GOOGLE_AI_API_KEY` or `GEMINI_API_KEY`:
+
+```bash
+GOOGLE_AI_API_KEY="AIza..." \
+  bin/ffmpeg_video_builder \
+  --google-ai-tts-file workspace/script.txt \
+  --google-ai-tts-output outputs/google_ai_speech.wav \
+  --google-ai-tts-voice Kore \
+  --google-ai-tts-style "Say calmly in a warm Indonesian narration style"
+```
+
+Inline text also works:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-ai-api-key "AIza..." \
+  --google-ai-tts "Halo dunia." \
+  --google-ai-tts-output outputs/halo.wav
+```
 
 Manual JSON project configs are still supported:
 

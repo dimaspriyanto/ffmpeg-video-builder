@@ -11,6 +11,7 @@ module OpenAIWhisper
   DEFAULT_OUTPUT_FORMAT = "json"
   DEFAULT_TASK = "transcribe"
   DEFAULT_WORD_TIMESTAMPS = true
+  SENTENCE_PAUSE_THRESHOLD = 0.3
   SUPPORTED_EXTENSIONS = %w[flac mp3 mp4 mpeg mpga m4a ogg wav webm].freeze
 
   Result = Struct.new(:download_dir, :output_files, :sentence_files, :response, :sentences, :stdout, :stderr, keyword_init: true) do
@@ -168,16 +169,29 @@ module OpenAIWhisper
     end
 
     def sentence_timings_from_words(response)
-      words = response.fetch("segments", []).flat_map { |segment| segment.fetch("words", []) }
+      segments = response.fetch("segments", [])
       sentences = []
       current_words = []
 
-      words.each do |word|
-        text = word.fetch("word", "").to_s.strip
-        next if text.empty?
+      segments.each_with_index do |segment, segment_index|
+        segment.fetch("words", []).each do |word|
+          text = word.fetch("word", "").to_s.strip
+          next if text.empty?
 
-        current_words << word
-        next unless sentence_end?(text)
+          current_words << word
+          next unless sentence_end?(text)
+
+          sentences << sentence_from_words(current_words)
+          current_words = []
+        end
+
+        next if current_words.empty?
+
+        next_segment = segments[segment_index + 1]
+        next unless next_segment
+
+        pause = next_segment.fetch("start").to_f - current_words.last.fetch("end").to_f
+        next if pause < SENTENCE_PAUSE_THRESHOLD
 
         sentences << sentence_from_words(current_words)
         current_words = []

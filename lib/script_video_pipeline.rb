@@ -2,12 +2,13 @@
 
 require "fileutils"
 require "json"
+require "open3"
 require "pathname"
 require "date"
 require "time"
 
 require_relative "icon_search"
-require_relative "kokoro_tts"
+require_relative "narration_tts"
 require_relative "openai_whisper"
 require_relative "project_directory"
 
@@ -18,6 +19,7 @@ module ScriptVideoPipeline
   DEFAULT_FPS = 30
   DEFAULT_BACKGROUND = { "type" => "color", "color" => "#FFC067" }.freeze
   DEFAULT_ICON_WIDTH = 320
+  DEFAULT_DARK_BACKGROUND_ICON_WIDTH = 320
   DEFAULT_ICON_X = "center"
   DEFAULT_ICON_Y = 560
   DEFAULT_WATERMARK_TEXT = "Financial\nAdvice"
@@ -85,6 +87,10 @@ module ScriptVideoPipeline
     Client.new.rebuild(project_dir: project_dir, options: options)
   end
 
+  def self.synchronize_project_subtitles(project_dir:, script_file:)
+    Client.new.synchronize_project_subtitles(project_dir: project_dir, script_file: script_file)
+  end
+
   class Client
     def prepare(script_file:, options: {})
       script_file = validate_script_file!(script_file)
@@ -99,11 +105,11 @@ module ScriptVideoPipeline
       raise ArgumentError, "No scripts found in bulk script file: #{scripts_file}" if script_contents.empty?
 
       background = options[:background] || detect_workspace_background(workspace_dir)
-      results = script_contents.map do |script_content|
+      results = script_contents.each_with_index.map do |script_content, index|
         prepare_script_content(
           script_content: script_content,
           source_file: scripts_file,
-          options: options.merge(background: background)
+          options: options.merge(background: background, bulk_video_index: index + 1)
         )
       end
 
@@ -125,13 +131,12 @@ module ScriptVideoPipeline
       project_dir = create_project_dir(options.fetch(:downloads_root, DEFAULT_DOWNLOADS_ROOT))
       local_script_file = File.join(project_dir, "script_input.txt")
       File.write(local_script_file, script_content.body)
+      copy_source_icon_config(source_file, project_dir)
 
-      narration = KokoroTTS.speak(
+      narration = NarrationTTS.speak(
         text_file: local_script_file,
-        voice: options.fetch(:kokoro_voice, KokoroTTS::DEFAULT_VOICE),
-        speed: options.fetch(:kokoro_speed, KokoroTTS::DEFAULT_SPEED),
-        lang_code: options.fetch(:kokoro_lang_code, KokoroTTS::DEFAULT_LANG_CODE),
-        download_dir: project_dir
+        download_dir: project_dir,
+        options: options
       )
 
       transcription = OpenAIWhisper.transcribe(
@@ -145,15 +150,23 @@ module ScriptVideoPipeline
         download_dir: project_dir
       )
 
-      sentences = transcription.sentences
+      sentences = synchronize_sentence_texts(transcription.sentences, script_content.body)
       raise "Whisper did not produce sentence timings" if sentences.empty?
+      sentences, narration_audio_file = apply_sentence_pause(sentences, narration.audio_file, project_dir, options)
+      subtitle_files = write_subtitle_files(project_dir, sentences)
 
-      icon_plan = build_icon_plan(sentences, project_dir, options)
+      icon_config_file = File.join(project_dir, "icon_config.json")
+      icon_config = read_json(icon_config_file, default: {})
+      icon_config = expand_local_icon_pool(icon_config, sentences, options)
+      write_json(icon_config_file, icon_config) unless icon_config.empty?
+      local_icon_sentence_indexes = local_icon_config_by_sentence(icon_config, project_dir).keys
+      icon_plan = build_icon_plan(sentences, project_dir, options, local_icon_sentence_indexes: local_icon_sentence_indexes)
+      icon_plan = download_icons_from_plan(icon_plan, project_dir, options, icon_config)
       icon_plan_file = write_json(File.join(project_dir, "icon_plan.json"), icon_plan)
       config = build_ffmpeg_config(
         sentences,
         icon_plan,
-        narration.audio_file,
+        narration_audio_file,
         project_dir,
         options,
         title_text: script_content.title,
@@ -168,8 +181,11 @@ module ScriptVideoPipeline
           category: script_content.category,
           source_script_file: source_file,
           script_file: local_script_file,
-          audio_file: narration.audio_file,
-          subtitle_file: transcription.sentence_files[:srt],
+          audio_file: narration_audio_file,
+          original_audio_file: narration.audio_file == narration_audio_file ? nil : narration.audio_file,
+          tts_engine: NarrationTTS.engine(options),
+          tts_metadata_file: narration.metadata_file,
+          subtitle_file: subtitle_files[:srt],
           icon_plan_file: icon_plan_file,
           config_file: config_file,
           background: config.fetch("background"),
@@ -180,12 +196,35 @@ module ScriptVideoPipeline
       Result.new(
         project_dir: project_dir,
         script_file: local_script_file,
-        audio_file: narration.audio_file,
-        subtitle_file: transcription.sentence_files[:srt],
+        audio_file: narration_audio_file,
+        subtitle_file: subtitle_files[:srt],
         icon_plan_file: icon_plan_file,
         config_file: config_file,
         output_file: File.join(project_dir, config.fetch("output"))
       )
+    end
+
+    def synchronize_project_subtitles(project_dir:, script_file:)
+      project_dir = validate_project_dir!(project_dir)
+      script_file = validate_script_file!(script_file)
+      script_content = parse_script_content(script_file)
+      subtitle_file = File.join(project_dir, "subtitle_sentences.json")
+      icon_plan_file = File.join(project_dir, "icon_plan.json")
+
+      raise "Missing subtitle timings: #{subtitle_file}" unless File.file?(subtitle_file)
+      raise "Missing icon plan: #{icon_plan_file}" unless File.file?(icon_plan_file)
+
+      sentences = synchronize_sentence_texts(read_json(subtitle_file), script_content.body)
+      write_subtitle_files(project_dir, sentences)
+
+      icon_plan = read_json(icon_plan_file)
+      synchronized_text = sentences.to_h { |sentence| [sentence.fetch("index").to_i, sentence.fetch("text")] }
+      icon_plan.each do |planned_icon|
+        planned_icon["sentence"] = synchronized_text.fetch(planned_icon.fetch("sentence_index").to_i)
+      end
+      write_json(icon_plan_file, icon_plan)
+
+      sentences
     end
 
     def rebuild(project_dir:, options: {})
@@ -193,6 +232,7 @@ module ScriptVideoPipeline
       metadata = read_json(File.join(project_dir, "pipeline_metadata.json"), default: {})
       existing_config = read_json(File.join(project_dir, "config_project.json"), default: {})
       icon_plan_file = File.join(project_dir, "icon_plan.json")
+      icon_config_file = File.join(project_dir, "icon_config.json")
       subtitle_json_file = File.join(project_dir, "subtitle_sentences.json")
       audio_file = metadata["audio_file"] || File.join(project_dir, "audio_voiceover.wav")
 
@@ -200,10 +240,11 @@ module ScriptVideoPipeline
       raise "Missing audio file: #{audio_file}" unless File.file?(audio_file)
 
       icon_plan = read_json(icon_plan_file)
+      icon_config = read_json(icon_config_file, default: {})
       sentences = File.file?(subtitle_json_file) ? read_json(subtitle_json_file) : sentences_from_icon_plan(icon_plan)
       raise "No sentence timings found for rebuild in #{project_dir}" if sentences.empty?
 
-      icon_plan = download_icons_from_plan(icon_plan, project_dir, options)
+      icon_plan = download_icons_from_plan(icon_plan, project_dir, options, icon_config)
       icon_plan_file = write_json(icon_plan_file, icon_plan)
       rebuild_options = options.dup
       existing_background = existing_config["background"] || metadata["background"]
@@ -273,6 +314,19 @@ module ScriptVideoPipeline
       ProjectDirectory.create(root: downloads_root)
     end
 
+    def copy_source_icon_config(source_file, project_dir)
+      source_dir = File.dirname(File.expand_path(source_file.to_s))
+      icon_config_file = File.join(source_dir, "icon_config.json")
+      return unless File.file?(icon_config_file)
+
+      FileUtils.cp(icon_config_file, File.join(project_dir, "icon_config.json"))
+      source_icons_dir = File.join(source_dir, "icons")
+      return unless File.directory?(source_icons_dir)
+
+      FileUtils.mkdir_p(File.join(project_dir, "icons"))
+      FileUtils.cp_r(Dir.glob(File.join(source_icons_dir, "*")), File.join(project_dir, "icons"))
+    end
+
     def read_json(path, default: nil)
       return default unless File.file?(path)
 
@@ -290,12 +344,19 @@ module ScriptVideoPipeline
       end
     end
 
-    def download_icons_from_plan(icon_plan, project_dir, options)
+    def download_icons_from_plan(icon_plan, project_dir, options, icon_config = {})
       validate_unique_icon_ids!(icon_plan)
+      local_icons = local_icon_config_by_sentence(icon_config, project_dir)
 
       icon_plan.each_with_index.map do |planned_icon, index|
-        icon_id = planned_icon["icon_id"].to_s.strip
         planned_icon = planned_icon.dup
+        sentence_index = planned_icon["sentence_index"] || index + 1
+
+        if (local_icon = local_icons[sentence_index.to_i])
+          next apply_local_icon_config(planned_icon, local_icon, project_dir, sentence_index)
+        end
+
+        icon_id = planned_icon["icon_id"].to_s.strip
 
         if icon_id.empty?
           planned_icon.delete("icon_file")
@@ -324,12 +385,118 @@ module ScriptVideoPipeline
       end
     end
 
+    def local_icon_config_by_sentence(icon_config, project_dir)
+      return {} unless icon_config.is_a?(Hash) || icon_config.is_a?(Array)
+
+      entries =
+        if icon_config.is_a?(Array)
+          icon_config
+        elsif icon_config["icons"].is_a?(Array)
+          icon_config["icons"]
+        else
+          icon_config.map do |sentence_index, value|
+            value.is_a?(Hash) ? value.merge("sentence_index" => sentence_index) : { "sentence_index" => sentence_index, "file" => value }
+          end
+        end
+
+      entries.each_with_object({}) do |entry, local_icons|
+        next unless entry.is_a?(Hash)
+
+        entry = entry.transform_keys(&:to_s)
+        sentence_index = entry["sentence_index"].to_i
+        next if sentence_index <= 0
+
+        file = entry["file"] || entry["path"] || entry["icon_file"]
+        next if file.to_s.strip.empty?
+
+        resolved_file = File.expand_path(file.to_s, project_dir)
+        raise ArgumentError, "Local icon file not found for sentence #{sentence_index}: #{resolved_file}" unless File.file?(resolved_file)
+
+        local_icons[sentence_index] = entry.merge("file" => resolved_file)
+      end
+    end
+
+    def expand_local_icon_pool(icon_config, sentences, options)
+      if icon_config.is_a?(Hash) && icon_config["icon_sets"].is_a?(Array)
+        video_index = options.fetch(:bulk_video_index, 1).to_i
+        icon_set = icon_config.fetch("icon_sets")[video_index - 1]
+        raise ArgumentError, "icon_sets does not contain icons for bulk video #{video_index}" unless icon_set.is_a?(Array)
+
+        pool = icon_set.map(&:to_s).reject(&:empty?)
+        raise ArgumentError, "Icon set #{video_index} must contain at least one local icon file" if pool.empty?
+
+        return {
+          "icons" => sentences.each_with_index.map do |sentence, index|
+            {
+              "sentence_index" => sentence.fetch("index"),
+              "file" => pool[index] || pool.last
+            }
+          end
+        }
+      end
+
+      return icon_config unless icon_config.is_a?(Hash) && icon_config["icon_pool"].is_a?(Array)
+
+      pool = icon_config.fetch("icon_pool").map(&:to_s).reject(&:empty?)
+      raise ArgumentError, "icon_pool must contain at least one local icon file" if pool.empty?
+
+      video_index = options.fetch(:bulk_video_index, 1).to_i
+      first_icon = pool[video_index - 1]
+      if first_icon.nil?
+        raise ArgumentError, "icon_pool has #{pool.length} files, but bulk video #{video_index} needs a matching first icon"
+      end
+
+      previous_icon = first_icon
+      assignments = sentences.map do |sentence|
+        sentence_index = sentence.fetch("index").to_i
+        icon_file =
+          if sentence_index == 1
+            first_icon
+          else
+            choices = pool.length > 1 ? pool.reject { |file| file == previous_icon } : pool
+            choices.sample
+          end
+        previous_icon = icon_file
+
+        {
+          "sentence_index" => sentence_index,
+          "file" => icon_file
+        }
+      end
+
+      { "icons" => assignments }
+    end
+
+    def apply_local_icon_config(planned_icon, local_icon, project_dir, sentence_index)
+      icon_dir = File.join(project_dir, "icons", format("%02d", sentence_index))
+      FileUtils.mkdir_p(icon_dir)
+
+      source = local_icon.fetch("file")
+      target = File.join(icon_dir, "local_#{File.basename(source)}")
+      FileUtils.cp(source, target) unless File.expand_path(source) == File.expand_path(target)
+
+      planned_icon.merge(
+        "keyword" => local_icon["keyword"].to_s.empty? ? planned_icon["keyword"] : local_icon["keyword"],
+        "icon_id" => local_icon["icon_id"].to_s.empty? ? "local:#{File.basename(source, '.*')}" : local_icon["icon_id"],
+        "icon_file" => target,
+        "icon_license" => local_icon["license"] || local_icon["icon_license"] || "local",
+        "icon_license_type" => local_icon["license_type"] || local_icon["icon_license_type"] || "local",
+        "icon_source" => local_icon["source"] || local_icon["icon_source"] || "local",
+        "icon_source_name" => local_icon["source_name"] || local_icon["icon_source_name"] || "Local icon_config.json",
+        "icon_style" => local_icon["style"] || local_icon["icon_style"] || "local",
+        "icon_svg_url" => local_icon["svg_url"] || local_icon["icon_svg_url"]
+      ).tap do |merged|
+        merged["animation"] = local_icon["animation"] if local_icon["animation"]
+        merged.delete("icon_svg_url") if merged["icon_svg_url"].to_s.empty?
+      end
+    end
+
     def validate_unique_icon_ids!(icon_plan)
       seen = {}
 
       icon_plan.each_with_index do |planned_icon, index|
         icon_id = planned_icon["icon_id"].to_s.strip
-        next if icon_id.empty?
+        next if icon_id.empty? || icon_id.start_with?("local:")
 
         if seen[icon_id]
           sentence = planned_icon["sentence_index"] || index + 1
@@ -356,7 +523,9 @@ module ScriptVideoPipeline
 
     def split_bulk_script_text(text)
       lines = text.lines(chomp: true)
-      title_indexes = lines.each_index.select { |index| lines[index].strip.match?(/\ATitle:\s*\S/i) }
+      title_indexes = lines.each_index.select do |index|
+        normalize_script_header_line(lines[index]).match?(/\ATitle:\s*\S/i)
+      end
 
       if title_indexes.length > 1
         return title_indexes.each_with_index.map do |start_index, index|
@@ -377,12 +546,12 @@ module ScriptVideoPipeline
 
       title = nil
       category = nil
-      content_index = lines.find_index { |line| line.strip.match?(/\AContent:\s*/i) }
+      content_index = lines.find_index { |line| normalize_script_header_line(line).match?(/\AContent:\s*/i) }
 
       if content_index
         header_lines = lines[0...content_index]
         title, category = extract_script_headers(header_lines)
-        first_content = lines[content_index].strip.sub(/\AContent:\s*/i, "")
+        first_content = normalize_script_header_line(lines[content_index]).sub(/\AContent:\s*/i, "")
         body_lines = []
         body_lines << first_content unless first_content.empty?
         body_lines.concat(lines[(content_index + 1)..] || [])
@@ -391,7 +560,7 @@ module ScriptVideoPipeline
         reading_headers = true
 
         lines.each do |line|
-          stripped = line.strip
+          stripped = normalize_script_header_line(line)
           if reading_headers
             if (match = stripped.match(/\ATitle:\s*(.+)\z/i))
               title = match[1].strip
@@ -424,7 +593,7 @@ module ScriptVideoPipeline
       category = nil
 
       lines.each do |line|
-        case line.strip
+        case normalize_script_header_line(line)
         when /\ATitle:\s*(.+)\z/i
           title = Regexp.last_match(1).strip
         when /\ACategory:\s*(.+)\z/i
@@ -435,6 +604,10 @@ module ScriptVideoPipeline
       [title, category]
     end
 
+    def normalize_script_header_line(line)
+      line.to_s.strip.sub(/\A\*\*/, "").sub(/\*\*\z/, "").strip
+    end
+
     def normalize_script_body(text, script_file)
       body = text.gsub(/\A[[:space:]]+/, "").gsub(/[[:space:]]+\z/, "")
       raise ArgumentError, "Script content is empty after parsing headers: #{script_file}" if body.empty?
@@ -442,20 +615,188 @@ module ScriptVideoPipeline
       "#{body}\n"
     end
 
-    def build_icon_plan(sentences, project_dir, options)
+    def synchronize_sentence_texts(sentences, script_body)
+      source_sentences = source_sentence_texts(script_body)
+      sentences = merge_excess_sentence_timings(sentences, source_sentences.length)
+      sentences = split_missing_sentence_timings(sentences, source_sentences.length)
+      if source_sentences.length != sentences.length
+        raise ArgumentError,
+              "Script has #{source_sentences.length} sentences, but Whisper produced #{sentences.length} timings. " \
+              "Adjust the script sentence breaks before generating the video."
+      end
+
+      sentences.each_with_index.map do |sentence, index|
+        sentence.merge("index" => index + 1, "text" => source_sentences.fetch(index))
+      end
+    end
+
+    def merge_excess_sentence_timings(sentences, target_count)
+      merged = sentences.map(&:dup)
+
+      while merged.length > target_count && merged.length > 1
+        merge_index = (0...(merged.length - 1)).min_by do |index|
+          merged[index + 1].fetch("start").to_f - merged[index].fetch("end").to_f
+        end
+        first = merged.fetch(merge_index)
+        second = merged.fetch(merge_index + 1)
+        merged[merge_index, 2] = [{
+          "index" => first.fetch("index"),
+          "start" => first.fetch("start"),
+          "end" => second.fetch("end"),
+          "text" => [first.fetch("text"), second.fetch("text")].join(" ").strip
+        }]
+      end
+
+      merged
+    end
+
+    def split_missing_sentence_timings(sentences, target_count)
+      split = sentences.map(&:dup)
+
+      while split.length < target_count && split.length > 1
+        split_index = split.each_index.max_by do |index|
+          split[index].fetch("end").to_f - split[index].fetch("start").to_f
+        end
+        sentence = split.fetch(split_index)
+        start_time = sentence.fetch("start").to_f
+        end_time = sentence.fetch("end").to_f
+        midpoint = ((start_time + end_time) / 2.0).round(3)
+
+        if midpoint <= start_time || midpoint >= end_time
+          midpoint = (start_time + 0.001).round(3)
+        end
+
+        first = sentence.merge("end" => midpoint)
+        second = sentence.merge("start" => midpoint)
+        split[split_index, 1] = [first, second]
+      end
+
+      split
+    end
+
+    def source_sentence_texts(script_body)
+      lines = script_body.to_s.lines.map(&:strip).reject(&:empty?)
+      lines.flat_map do |line|
+        line.scan(/[^.!?]+[.!?]?/).map(&:strip).reject(&:empty?)
+      end
+    end
+
+    def write_subtitle_files(project_dir, sentences)
+      json_file = write_json(File.join(project_dir, "subtitle_sentences.json"), sentences)
+      srt_file = File.join(project_dir, "subtitle_sentences.srt")
+      File.write(srt_file, sentences_to_srt(sentences))
+      { json: json_file, srt: srt_file }
+    end
+
+    def apply_sentence_pause(sentences, audio_file, project_dir, options)
+      pause_seconds = options.fetch(:pipeline_sentence_pause, 0).to_f
+      return [sentences, audio_file] unless pause_seconds.positive? && sentences.length > 1
+
+      output_file = File.join(project_dir, "audio_voiceover_paused.wav")
+      filters = []
+      labels = []
+      trim_padding = options.fetch(:pipeline_sentence_trim_padding, 0.12).to_f
+
+      sentences.each_with_index do |sentence, index|
+        segment_label = "s#{index}"
+        segment_start = sentence.fetch("start").to_f
+        segment_end = sentence.fetch("end").to_f
+        previous_end = index.positive? ? sentences[index - 1].fetch("end").to_f : 0.0
+        next_start = sentences[index + 1]&.fetch("start")&.to_f
+        padded_start = [segment_start - trim_padding, previous_end, 0.0].max
+        padded_end = next_start ? [segment_end + trim_padding, next_start].min : segment_end + trim_padding
+        padded_end = [padded_end, padded_start + 0.001].max
+
+        filters << "[0:a]atrim=start=#{padded_start}:end=#{padded_end},asetpts=PTS-STARTPTS[#{segment_label}]"
+        labels << segment_label
+
+        next if index == sentences.length - 1
+
+        pause_label = "p#{index}"
+        filters << "anullsrc=r=22050:cl=mono,atrim=duration=#{pause_seconds},asetpts=PTS-STARTPTS[#{pause_label}]"
+        labels << pause_label
+      end
+
+      concat_inputs = labels.map { |label| "[#{label}]" }.join
+      filters << "#{concat_inputs}concat=n=#{labels.length}:v=0:a=1[out]"
+
+      command = [
+        "ffmpeg", "-y",
+        "-i", audio_file,
+        "-filter_complex", filters.join(";"),
+        "-map", "[out]",
+        "-ar", "22050",
+        "-ac", "1",
+        output_file
+      ]
+      stdout, stderr, status = Open3.capture3(*command)
+      raise "Failed to insert sentence pauses: #{stderr.empty? ? stdout : stderr}" unless status.success?
+      raise "Sentence pause audio was not created: #{output_file}" unless File.file?(output_file)
+
+      current_time = 0.0
+      paused_sentences = sentences.map.with_index do |sentence, index|
+        segment_start = sentence.fetch("start").to_f
+        segment_end = sentence.fetch("end").to_f
+        previous_end = index.positive? ? sentences[index - 1].fetch("end").to_f : 0.0
+        next_start = sentences[index + 1]&.fetch("start")&.to_f
+        padded_start = [segment_start - trim_padding, previous_end, 0.0].max
+        padded_end = next_start ? [segment_end + trim_padding, next_start].min : segment_end + trim_padding
+        duration = [padded_end - padded_start, 0.001].max
+        start_time = current_time
+        end_time = start_time + duration
+        current_time = end_time + (index == sentences.length - 1 ? 0.0 : pause_seconds)
+
+        sentence.merge(
+          "start" => start_time.round(3),
+          "end" => end_time.round(3)
+        )
+      end
+
+      [paused_sentences, output_file]
+    end
+
+    def sentences_to_srt(sentences)
+      sentences.map do |sentence|
+        [
+          sentence.fetch("index"),
+          "#{srt_time(sentence.fetch("start"))} --> #{srt_time(sentence.fetch("end"))}",
+          sentence.fetch("text"),
+          ""
+        ].join("\n")
+      end.join("\n")
+    end
+
+    def srt_time(seconds)
+      milliseconds = (seconds.to_f * 1000).round
+      hours = milliseconds / 3_600_000
+      milliseconds %= 3_600_000
+      minutes = milliseconds / 60_000
+      milliseconds %= 60_000
+      secs = milliseconds / 1000
+      millis = milliseconds % 1000
+      format("%<hours>02d:%<minutes>02d:%<seconds>02d,%<millis>03d",
+             hours: hours, minutes: minutes, seconds: secs, millis: millis)
+    end
+
+    def build_icon_plan(sentences, project_dir, options, local_icon_sentence_indexes: [])
       used_icon_ids = {}
 
       sentences.map do |sentence|
         index = sentence.fetch("index")
         keywords = icon_keywords(sentence.fetch("text"))
-        icon_dir = File.join(project_dir, "icons", format("%02d", index))
-        keyword, icon = first_matching_icon(
-          keywords: keywords,
-          icon_dir: icon_dir,
-          options: options,
-          used_icon_ids: used_icon_ids
-        )
-        used_icon_ids[icon.id] = true if icon
+        if local_icon_sentence_indexes.include?(index.to_i)
+          keyword = keywords.first
+          icon = nil
+        else
+          icon_dir = File.join(project_dir, "icons", format("%02d", index))
+          keyword, icon = first_matching_icon(
+            keywords: keywords,
+            icon_dir: icon_dir,
+            options: options,
+            used_icon_ids: used_icon_ids
+          )
+          used_icon_ids[icon.id] = true if icon
+        end
 
         {
           "sentence_index" => index,
@@ -474,12 +815,22 @@ module ScriptVideoPipeline
 
     def build_ffmpeg_config(sentences, icon_plan, audio_file, project_dir, options, title_text:, category_text:)
       duration = [sentences.map { |sentence| sentence.fetch("end").to_f }.max + 0.35, 1.0].max.round(3)
-      elements = [watermark_element(duration, category_text)]
-      elements << waveform_element(duration, audio_file, project_dir) if options.fetch(:pipeline_waveform, true)
+      background = background_config(options)
+      text_color = options.fetch(:pipeline_text_color, dark_background?(background) ? "white" : "black")
+      category_color = options.fetch(:pipeline_category_color, text_color)
+      waveform_color = options.fetch(:pipeline_waveform_color, dark_background?(background) ? "0xffffff" : "0x111111")
       visible_icons = icon_plan.select { |planned_icon| planned_icon["icon_file"] }
-      icon_width = options.fetch(:pipeline_icon_width, DEFAULT_ICON_WIDTH)
+      icon_width = options.fetch(:pipeline_icon_width, dark_background?(background) ? DEFAULT_DARK_BACKGROUND_ICON_WIDTH : DEFAULT_ICON_WIDTH)
+      layout_offset_y = options.fetch(:pipeline_layout_offset_y, 0).to_f
+      icon_y = options.key?(:pipeline_icon_y) ? options.fetch(:pipeline_icon_y).to_f : DEFAULT_ICON_Y + layout_offset_y
+      text_y = options.key?(:pipeline_text_y) ? options.fetch(:pipeline_text_y).to_f : DEFAULT_TEXT_Y + layout_offset_y
+      forced_icon_animation = options[:pipeline_icon_animation].to_s
+      elements = [watermark_element(duration, category_text, color: category_color)]
+      if options.fetch(:pipeline_waveform, true)
+        elements << waveform_element(duration, audio_file, project_dir, color: waveform_color, anchor_y: icon_y)
+      end
 
-      icon_plan.each do |planned_icon|
+      icon_plan.each_with_index do |planned_icon, icon_index|
         text_start = visual_start_time(planned_icon)
         text_end = visual_text_end_time(planned_icon, text_start)
         text = planned_icon.fetch("sentence")
@@ -490,7 +841,7 @@ module ScriptVideoPipeline
 
         if planned_icon["icon_file"]
           position = visible_icons.index(planned_icon)
-          icon_start = visual_start_time(planned_icon)
+          icon_start = icon_index.zero? ? 0.0 : visual_start_time(planned_icon)
           elements << {
             "type" => "image",
             "file" => relative_path(planned_icon.fetch("icon_file"), project_dir),
@@ -498,8 +849,9 @@ module ScriptVideoPipeline
             "end" => icon_end_time(position, visible_icons, duration),
             "width" => icon_width,
             "x" => DEFAULT_ICON_X,
-            "y" => DEFAULT_ICON_Y,
-            "animation" => safe_icon_animation(planned_icon),
+            "y" => icon_y,
+            "animation" => icon_index.zero? ? "none" : safe_icon_animation(planned_icon, forced: forced_icon_animation),
+            "trim_transparency" => false,
             "hold" => true
           }
         end
@@ -513,9 +865,9 @@ module ScriptVideoPipeline
             "paragraph_index" => paragraph.fetch("paragraph_index"),
             "paragraph_count" => paragraph.fetch("paragraph_count"),
             "font_size" => DEFAULT_TEXT_FONT_SIZE,
-            "color" => "black",
+            "color" => text_color,
             "x" => "center",
-            "y" => DEFAULT_TEXT_Y,
+            "y" => text_y,
             "text_align" => "left",
             "box" => false,
             "fallback_width" => DEFAULT_TEXT_WIDTH,
@@ -525,20 +877,44 @@ module ScriptVideoPipeline
         end
       end
 
-      {
+      config = {
         "output" => output_filename(project_dir, title_text),
         "width" => options.fetch(:width, DEFAULT_WIDTH),
         "height" => options.fetch(:height, DEFAULT_HEIGHT),
         "fps" => options.fetch(:fps, DEFAULT_FPS),
         "duration" => duration,
-        "background" => background_config(options),
+        "background" => background,
         "audio" => relative_path(audio_file, project_dir),
         "elements" => elements
       }
+      sound_effects = sentence_sound_effects(sentences, project_dir, options)
+      config["sound_effects"] = sound_effects unless sound_effects.empty?
+      config
     end
 
     def background_config(options)
       deep_dup(options.fetch(:background, DEFAULT_BACKGROUND))
+    end
+
+    def dark_background?(background)
+      background = background.transform_keys(&:to_s)
+      color = background["color"].to_s
+      return dark_hex_color?(color) unless color.empty?
+
+      path = background["path"].to_s
+      basename = File.basename(path).downcase
+      basename.include?("black") || basename.include?("grey") || basename.include?("gray")
+    end
+
+    def dark_hex_color?(color)
+      match = color.match(/\A#?([[:xdigit:]]{6})\z/)
+      return false unless match
+
+      hex = match[1]
+      red = hex[0, 2].to_i(16)
+      green = hex[2, 2].to_i(16)
+      blue = hex[4, 2].to_i(16)
+      ((red * 0.299) + (green * 0.587) + (blue * 0.114)) < 128
     end
 
     def resolve_bulk_scripts_file(workspace_dir, scripts_file)
@@ -608,7 +984,7 @@ module ScriptVideoPipeline
       JSON.parse(JSON.generate(value))
     end
 
-    def waveform_element(duration, audio_file, project_dir)
+    def waveform_element(duration, audio_file, project_dir, color: "0x111111", anchor_y: DEFAULT_ICON_Y)
       {
         "type" => "waveform",
         "audio" => relative_path(audio_file, project_dir),
@@ -618,10 +994,10 @@ module ScriptVideoPipeline
         "height" => DEFAULT_WAVEFORM_HEIGHT,
         "x" => "center",
         "position" => "bottom",
-        "anchor_y" => DEFAULT_ICON_Y,
-        "anchor_height" => DEFAULT_ICON_WIDTH,
-        "gap" => DEFAULT_WAVEFORM_GAP,
-        "color" => "0x111111",
+        "anchor_element_type" => "image",
+        "anchor_y" => anchor_y,
+        "gap" => 20,
+        "color" => color,
         "opacity" => DEFAULT_WAVEFORM_OPACITY,
         "mode" => "cline",
         "scale" => "sqrt",
@@ -648,14 +1024,14 @@ module ScriptVideoPipeline
       words.map { |word| word[0].upcase + word[1..].to_s }.join
     end
 
-    def watermark_element(duration, category_text)
+    def watermark_element(duration, category_text, color: "black")
       {
         "type" => "text",
         "text" => watermark_text(category_text),
         "start" => 0,
         "end" => duration,
         "font_size" => DEFAULT_WATERMARK_FONT_SIZE,
-        "color" => "black",
+        "color" => color,
         "x" => "center",
         "y" => DEFAULT_WATERMARK_Y,
         "text_align" => "center",
@@ -681,11 +1057,28 @@ module ScriptVideoPipeline
       visual_start_time(next_icon)
     end
 
-    def safe_icon_animation(planned_icon)
+    def safe_icon_animation(planned_icon, forced: nil)
+      forced_animation = forced.to_s
+      return forced_animation if ICON_ANIMATIONS.include?(forced_animation)
+
       animation = planned_icon["animation"].to_s
       return animation if ICON_ANIMATIONS.include?(animation)
 
       ICON_ANIMATIONS[(planned_icon.fetch("sentence_index") - 1) % ICON_ANIMATIONS.length]
+    end
+
+    def sentence_sound_effects(sentences, project_dir, options)
+      sound_effect = options[:pipeline_sentence_sound_effect].to_s
+      return [] if sound_effect.empty?
+
+      volume = options.fetch(:pipeline_sound_effect_volume, 0.55).to_f
+      sentences.map do |sentence|
+        {
+          "file" => relative_path(sound_effect, project_dir),
+          "start" => sentence.fetch("start"),
+          "volume" => volume
+        }
+      end
     end
 
     def first_matching_icon(keywords:, icon_dir:, options:, used_icon_ids:)

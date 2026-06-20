@@ -11,3 +11,4 @@
 /projects/
 /kokoro-test/
 /config/local.env
+/workspace/.hf_cache/

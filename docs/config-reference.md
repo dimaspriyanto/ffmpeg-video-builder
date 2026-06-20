@@ -8,7 +8,7 @@ The primary bundle input is a text script:
 bin/ffmpeg_video_builder script.txt
 ```
 
-The pipeline generates narration with local Kokoro, derives sentence subtitles
+The pipeline generates narration with Kokoro or Google AI TTS, derives sentence subtitles
 with local Whisper, chooses icon keywords from the subtitle sentences, downloads
 matching Iconify icons, writes a generated `config_project.json`, and renders the final
 video with FFmpeg.
@@ -125,6 +125,55 @@ as `bin/ffmpeg_video_builder workspace/script.txt`.
 }
 ```
 
+### Narration TTS
+
+Kokoro is the default TTS engine. Existing workspaces do not need any changes:
+
+```json
+{
+  "kokoro": {
+    "voice": "af_heart",
+    "speed": 1.0,
+    "lang_code": "a"
+  }
+}
+```
+
+The engine may also be selected explicitly:
+
+```json
+{
+  "tts": {
+    "engine": "kokoro"
+  }
+}
+```
+
+Explicit CLI options have the highest priority:
+
+```bash
+bin/ffmpeg_video_builder --tts-engine google_ai workspace/script.txt
+```
+
+Defining a `google_ai_tts` object selects Google AI Gemini TTS:
+
+```json
+{
+  "google_ai_tts": {
+    "model": "gemini-3.1-flash-tts-preview",
+    "voice": "Zephyr",
+    "style": "Scene: Sincere calm night. Speaker: Zephyr. Speaker style: Empathetic."
+  }
+}
+```
+
+The API key is read from `GOOGLE_AI_API_KEY` or `GEMINI_API_KEY`. You may also
+set `api_key` inside `google_ai_tts`, but environment variables or
+`config/local.env` are safer for private keys. Google AI TTS writes the normal
+project narration file, `audio_voiceover.wav`, plus `audio_voiceover.google_ai_tts.json`.
+Available CLI options are `--google-ai-api-key`, `--google-ai-tts-model`,
+`--google-ai-tts-voice`, and `--google-ai-tts-style`.
+
 Workspace background behavior:
 
 - If the workspace contains `background.png`, `background.jpg`,
@@ -160,6 +209,161 @@ For example, the first project created on June 2, 2026 is written to
 After a successful render, the final MP4 is moved into `outputs/`. The project
 metadata file is updated with the moved `output_file` path. Bulk workspace
 manifests are also updated with the moved output paths.
+
+## Google Drive Upload
+
+The CLI can upload rendered files to Google Drive using the `GoogleDriveUpload`
+module. Authenticate with either `GOOGLE_DRIVE_ACCESS_TOKEN` or a service
+account JSON file passed through `--google-drive-credentials`,
+`GOOGLE_DRIVE_CREDENTIALS`, or `GOOGLE_APPLICATION_CREDENTIALS`.
+
+Upload one file:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-drive-credentials config/google-service-account.json \
+  --google-drive-folder-id "DRIVE_FOLDER_ID" \
+  --google-drive-upload outputs/02062026_MyVideoTitle.mp4
+```
+
+Upload all output files listed in a workspace manifest:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-drive-credentials config/google-service-account.json \
+  --google-drive-folder-id "DRIVE_FOLDER_ID" \
+  --google-drive-upload-workspace workspace
+```
+
+For a single file you may override the Drive filename:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-drive-upload outputs/02062026_MyVideoTitle.mp4 \
+  --google-drive-name "Published Video.mp4"
+```
+
+## Facebook Upload
+
+The `FacebookUpload` module uploads rendered MP4 files to a Facebook Page using
+the Graph Video endpoint. Authentication requires a Page ID and Page access
+token, provided by `FACEBOOK_PAGE_ID` / `FACEBOOK_ACCESS_TOKEN` or CLI flags.
+
+Upload one file:
+
+```bash
+bin/ffmpeg_video_builder \
+  --facebook-page-id "123456789" \
+  --facebook-access-token "EAAB..." \
+  --facebook-upload outputs/02062026_MyVideoTitle.mp4
+```
+
+Upload every output listed in a workspace manifest:
+
+```bash
+bin/ffmpeg_video_builder \
+  --facebook-page-id "123456789" \
+  --facebook-access-token "EAAB..." \
+  --facebook-upload-workspace workspace
+```
+
+Available Facebook CLI options:
+
+- `--facebook-upload FILE`
+- `--facebook-upload-workspace DIR`
+- `--facebook-page-id ID`
+- `--facebook-access-token TOKEN`
+- `--facebook-title TITLE`
+- `--facebook-description DESCRIPTION`
+- `--facebook-unpublished`
+
+## TikTok Upload
+
+The `TikTokUpload` module uses TikTok's Content Posting API. Authentication
+requires a TikTok user access token from Login Kit. Set `TIKTOK_ACCESS_TOKEN` or
+pass `--tiktok-access-token`.
+
+Inbox upload sends the video to the user's TikTok inbox/editing flow and
+requires the `video.upload` scope:
+
+```bash
+bin/ffmpeg_video_builder \
+  --tiktok-access-token "act..." \
+  --tiktok-upload outputs/02062026_MyVideoTitle.mp4
+```
+
+Upload all output files listed in a workspace manifest:
+
+```bash
+bin/ffmpeg_video_builder \
+  --tiktok-access-token "act..." \
+  --tiktok-upload-workspace workspace
+```
+
+Direct post uses the `video.publish` scope and includes `post_info`:
+
+```bash
+bin/ffmpeg_video_builder \
+  --tiktok-access-token "act..." \
+  --tiktok-upload outputs/02062026_MyVideoTitle.mp4 \
+  --tiktok-direct-post \
+  --tiktok-title "Caption #fyp" \
+  --tiktok-privacy-level SELF_ONLY \
+  --tiktok-disable-comment \
+  --tiktok-aigc
+```
+
+Available TikTok CLI options:
+
+- `--tiktok-upload FILE`
+- `--tiktok-upload-workspace DIR`
+- `--tiktok-access-token TOKEN`
+- `--tiktok-direct-post`
+- `--tiktok-title TITLE`
+- `--tiktok-privacy-level LEVEL`
+- `--tiktok-disable-duet`
+- `--tiktok-disable-comment`
+- `--tiktok-disable-stitch`
+- `--tiktok-aigc`
+- `--tiktok-chunk-size BYTES`
+
+TikTok notes that unaudited clients may be restricted to private visibility for
+direct posts.
+
+## Google AI Studio Speech Generation
+
+The `GoogleAITTS` module calls the Gemini API text-to-speech endpoint used by
+Google AI Studio's speech generation flow. Authentication uses
+`GOOGLE_AI_API_KEY`, `GEMINI_API_KEY`, or `--google-ai-api-key`.
+
+Generate speech from a text file:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-ai-api-key "AIza..." \
+  --google-ai-tts-file workspace/script.txt \
+  --google-ai-tts-output outputs/google_ai_speech.wav \
+  --google-ai-tts-voice Kore \
+  --google-ai-tts-style "Say calmly in a warm Indonesian narration style"
+```
+
+Generate speech from inline text:
+
+```bash
+bin/ffmpeg_video_builder \
+  --google-ai-tts "Halo dunia." \
+  --google-ai-tts-output outputs/halo.wav
+```
+
+Available Google AI TTS CLI options:
+
+- `--google-ai-tts TEXT`
+- `--google-ai-tts-file FILE`
+- `--google-ai-tts-output FILE`
+- `--google-ai-api-key KEY`
+- `--google-ai-tts-model MODEL`
+- `--google-ai-tts-voice VOICE`
+- `--google-ai-tts-style STYLE`
 
 For script-driven projects, the rendered video filename is built from the
 project date and script title. For example, a script titled `My Video Title`

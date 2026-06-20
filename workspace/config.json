@@ -6,7 +6,7 @@
   },
   "background": {
     "type": "image",
-    "path": "background.png"
+    "path": "background_dark_orange_solid.png"
   },
   "icon": {
     "source_url": "https://icon-sets.iconify.design/noto-v1",
@@ -17,12 +17,21 @@
   },
   "pipeline": {
     "waveform": true,
-    "icon_width": 320
+    "icon_width": 420,
+    "icon_trim_transparency": true,
+    "text_color": "white",
+    "category_color": "white",
+    "waveform_color": "0xffffff"
   },
   "kokoro": {
     "voice": "af_heart",
     "speed": 1.0,
     "lang_code": "a"
+  },
+  "google_ai_tts": {
+    "model": "gemini-3.1-flash-tts-preview",
+    "voice": "Zephyr",
+    "style": "Scene: Sincere calm night. Speaker: Zephyr. Speaker style: Emphatetic. Gunakan logat Bahasa Indonesia, laki-laki. Khusus untuk bagian dalam tanda kutip, gunakan Bahasa Jawa dan logat Jawa."
   },
   "whisper": {
     "model": "base",

@@ -1,0 +1,65 @@
+{
+  "workspace_dir": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/workspace",
+  "scripts_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/workspace/script.txt",
+  "background": {
+    "type": "color",
+    "color": "#000000"
+  },
+  "generated_at": "2026-06-14T23:07:54+07:00",
+  "videos": [
+    {
+      "project_dir": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_8_14062026",
+      "script_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_8_14062026/script_input.txt",
+      "audio_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_8_14062026/audio_voiceover.wav",
+      "subtitle_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_8_14062026/subtitle_sentences.srt",
+      "icon_plan_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_8_14062026/icon_plan.json",
+      "config_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_8_14062026/config_project.json",
+      "output_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/outputs/14062026_MemayuHayuningBawono.mp4"
+    },
+    {
+      "project_dir": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_9_14062026",
+      "script_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_9_14062026/script_input.txt",
+      "audio_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_9_14062026/audio_voiceover.wav",
+      "subtitle_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_9_14062026/subtitle_sentences.srt",
+      "icon_plan_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_9_14062026/icon_plan.json",
+      "config_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_9_14062026/config_project.json",
+      "output_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/outputs/14062026_UripIkuUrup.mp4"
+    },
+    {
+      "project_dir": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_10_14062026",
+      "script_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_10_14062026/script_input.txt",
+      "audio_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_10_14062026/audio_voiceover.wav",
+      "subtitle_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_10_14062026/subtitle_sentences.srt",
+      "icon_plan_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_10_14062026/icon_plan.json",
+      "config_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_10_14062026/config_project.json",
+      "output_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/outputs/14062026_OjoDumeh.mp4"
+    },
+    {
+      "project_dir": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_11_14062026",
+      "script_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_11_14062026/script_input.txt",
+      "audio_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_11_14062026/audio_voiceover.wav",
+      "subtitle_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_11_14062026/subtitle_sentences.srt",
+      "icon_plan_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_11_14062026/icon_plan.json",
+      "config_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_11_14062026/config_project.json",
+      "output_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/outputs/14062026_AlonAlonWatonKelakon.mp4"
+    },
+    {
+      "project_dir": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_12_14062026",
+      "script_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_12_14062026/script_input.txt",
+      "audio_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_12_14062026/audio_voiceover.wav",
+      "subtitle_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_12_14062026/subtitle_sentences.srt",
+      "icon_plan_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_12_14062026/icon_plan.json",
+      "config_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_12_14062026/config_project.json",
+      "output_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/outputs/14062026_SuraDiraJayaningratLeburDeningPangastuti.mp4"
+    },
+    {
+      "project_dir": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_13_14062026",
+      "script_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_13_14062026/script_input.txt",
+      "audio_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_13_14062026/audio_voiceover.wav",
+      "subtitle_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_13_14062026/subtitle_sentences.srt",
+      "icon_plan_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_13_14062026/icon_plan.json",
+      "config_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/projects/Project_13_14062026/config_project.json",
+      "output_file": "/home/magicjungle/Desktop/Projects/ffmpeg-video-builder/outputs/14062026_NrimoIngPandum.mp4"
+    }
+  ]
+}

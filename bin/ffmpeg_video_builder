@@ -11,7 +11,12 @@ require "uri"
 require "tempfile"
 require_relative "../lib/icon_search"
 require_relative "../lib/kokoro_tts"
+require_relative "../lib/narration_tts"
 require_relative "../lib/openai_whisper"
+require_relative "../lib/facebook_upload"
+require_relative "../lib/google_drive_upload"
+require_relative "../lib/google_ai_tts"
+require_relative "../lib/tiktok_upload"
 require_relative "../lib/script_video_pipeline"
 
 def load_local_environment!
@@ -151,12 +156,14 @@ class FFmpegVideoBuilder
   def add_image_element(element, index)
     image = prepare_image_file(
       resolve_file!(element.fetch("file")),
-      rasterize_size: element["rasterize_size"]
+      rasterize_size: element["rasterize_size"],
+      trim_transparency: truthy?(element.fetch("trim_transparency", false))
     )
     file = image.fetch(:file)
     start_time = number(element.fetch("start", 0))
     end_time = number(element.fetch("end", @duration))
     width = integer(element.fetch("width", 300))
+    height = element.key?("height") ? integer(element.fetch("height")) : nil
     opacity = number(element.fetch("opacity", 1.0))
     animation = element.fetch("animation", "fade")
     persist = truthy?(element.fetch("persist", false))
@@ -171,7 +178,7 @@ class FFmpegVideoBuilder
 
     filter = "[#{@input_index}:v]format=rgba"
     filter += transparent_background_filter if remove_background
-    filter += image_transform_filter(animation, width, start_time)
+    filter += image_transform_filter(animation, width, start_time, height: height)
     filter += ",colorchannelmixer=aa=#{opacity}" if opacity < 1.0
     filter += image_fade_filter(animation, start_time, end_time, hold: hold, preserve_alpha: preserve_alpha)
     filter += "[#{input_label}]"
@@ -187,7 +194,7 @@ class FFmpegVideoBuilder
   end
 
   def add_text_element(element, index)
-    if ubuntu_environment? && element.fetch("text").to_s.include?("\n")
+    if ubuntu_environment? && (element.fetch("text").to_s.include?("\n") || element.key?("paragraph_index"))
       add_text_image_element(element, index)
       return
     end
@@ -234,7 +241,7 @@ class FFmpegVideoBuilder
                    end
     render_scale = ubuntu_environment? ? number(element.fetch("fallback_render_scale", 1.1)) : 1.0
     y = element.fetch("y", @height - 500)
-    y = number(y) - 166 if ubuntu_environment? && element.key?("paragraph_index")
+    y = number(y) - 116 if ubuntu_environment? && element.key?("paragraph_index")
 
     fallback = {
       "type" => "image",
@@ -245,8 +252,8 @@ class FFmpegVideoBuilder
       "x" => element.fetch("x", "center"),
       "y" => y,
       "animation" => "none",
-      "remove_background" => true,
-      "preserve_alpha" => false,
+      "remove_background" => false,
+      "preserve_alpha" => true,
       "rasterize_size" => integer(element.fetch("fallback_rasterize_size", 640))
     }
 
@@ -303,9 +310,22 @@ class FFmpegVideoBuilder
     return position_y(element["y"]) if element.key?("y")
 
     position = element.fetch("position", "bottom").to_s
-    anchor_y = number(element.fetch("anchor_y", 560))
-    anchor_height = number(element.fetch("anchor_height", element.fetch("anchor_width", waveform_width)))
     gap = number(element.fetch("gap", 44))
+    anchor_y = nil
+    anchor_height = nil
+
+    if element["anchor_element_type"].to_s == "image"
+      anchor = @config.fetch("elements", []).find { |candidate| %w[image icon].include?(candidate["type"]) }
+      if anchor
+        source_width, source_height = image_dimensions(resolve_file!(anchor.fetch("file")))
+        anchor_y = number(anchor.fetch("y", 560))
+        anchor_width = number(anchor.fetch("width", 300))
+        anchor_height = anchor_width * source_height / source_width
+      end
+    end
+
+    anchor_y ||= number(element.fetch("anchor_y", 560))
+    anchor_height ||= number(element.fetch("anchor_height", element.fetch("anchor_width", waveform_width)))
 
     case position
     when "bottom", "below"
@@ -317,6 +337,16 @@ class FFmpegVideoBuilder
     end
   end
 
+  def image_dimensions(file)
+    stdout, status = Open3.capture2("identify", "-format", "%w %h", file)
+    raise "Could not read image dimensions: #{file}" unless status.success?
+
+    width, height = stdout.split.map(&:to_f)
+    raise "Invalid image dimensions: #{file}" unless width.positive? && height.positive?
+
+    [width, height]
+  end
+
   def build_output_command
     audio_file = resolve_optional_file(@config["audio"])
     output = resolve_output(@config.fetch("output"))
@@ -325,13 +355,14 @@ class FFmpegVideoBuilder
       @input_args += ["-i", audio_file]
       audio_index = @input_index
       @input_index += 1
+      audio_map = add_sound_effect_mix(audio_index)
 
       [
         "ffmpeg", "-y",
         *@input_args,
         "-filter_complex", @filters.join(";"),
         "-map", "[#{@current_video_label}]",
-        "-map", "#{audio_index}:a",
+        "-map", audio_map,
         "-t", @duration.to_s,
         "-r", @fps.to_s,
         "-c:v", "libx264",
@@ -356,6 +387,33 @@ class FFmpegVideoBuilder
     end
   end
 
+  def add_sound_effect_mix(audio_index)
+    sound_effects = Array(@config["sound_effects"]).select { |effect| effect.is_a?(Hash) }
+    return "#{audio_index}:a" if sound_effects.empty?
+
+    main_label = "amain"
+    @filters << "[#{audio_index}:a]asetpts=PTS-STARTPTS[#{main_label}]"
+
+    effect_labels = sound_effects.each_with_index.map do |effect, index|
+      file = resolve_file!(effect.fetch("file"))
+      start_time = number(effect.fetch("start", 0))
+      volume = number(effect.fetch("volume", 0.55))
+      delay_ms = (start_time * 1000).round
+      input_index = @input_index
+
+      @input_args += ["-i", file]
+      @input_index += 1
+
+      label = "sfx#{index}"
+      @filters << "[#{input_index}:a]adelay=#{delay_ms}:all=1,volume=#{volume}[#{label}]"
+      label
+    end
+
+    inputs = ([main_label] + effect_labels).map { |label| "[#{label}]" }.join
+    @filters << "#{inputs}amix=inputs=#{effect_labels.length + 1}:duration=first:dropout_transition=0:normalize=0[aout]"
+    "[aout]"
+  end
+
   def image_fade_filter(animation, start_time, end_time, hold: false, preserve_alpha: false)
     case animation
     when "none"
@@ -376,9 +434,14 @@ class FFmpegVideoBuilder
     end
   end
 
-  def image_transform_filter(animation, width, start_time)
+  def image_transform_filter(animation, width, start_time, height: nil)
     transition = 0.45
     progress = "min(max((t-#{start_time})/#{transition},0),1)"
+    if height
+      return ",scale=#{width}:#{height}:force_original_aspect_ratio=decrease," \
+             "pad=#{width}:#{height}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=rgba"
+    end
+
     base_scale = "scale=#{width}:-1:eval=frame,format=rgba"
 
     case animation
@@ -483,16 +546,22 @@ class FFmpegVideoBuilder
     full_path
   end
 
-  def prepare_image_file(file, rasterize_size: nil)
-    return { file: file, remove_background: false, preserve_alpha: false } unless File.extname(file).downcase == ".svg"
+  def prepare_image_file(file, rasterize_size: nil, trim_transparency: false)
+    if File.extname(file).downcase == ".svg"
+      return { file: file, remove_background: false, preserve_alpha: false } if !ubuntu_environment? && ffmpeg_decoder_available?("svg")
 
-    return { file: file, remove_background: false, preserve_alpha: false } if !ubuntu_environment? && ffmpeg_decoder_available?("svg")
+      rasterized = rasterize_svg!(file, size: rasterize_size)
+      return { file: rasterized, remove_background: false, preserve_alpha: true } if ubuntu_environment?
 
-    if ubuntu_environment?
-      { file: rasterize_svg!(file, size: rasterize_size), remove_background: false, preserve_alpha: true }
-    else
-      { file: rasterize_svg!(file, size: rasterize_size), remove_background: true, preserve_alpha: false }
+      return { file: rasterized, remove_background: true, preserve_alpha: false }
     end
+
+    if trim_transparency && ubuntu_environment?
+      trimmed = trim_transparent_image!(file)
+      return { file: trimmed, remove_background: false, preserve_alpha: false } if trimmed
+    end
+
+    { file: file, remove_background: false, preserve_alpha: false }
   end
 
   def transparent_background_filter
@@ -502,6 +571,27 @@ class FFmpegVideoBuilder
     end
 
     ",colorkey=white:0.08:0.0"
+  end
+
+  def trim_transparent_image!(file)
+    image_magick = %w[magick convert].find { |command| executable_in_path?(command) }
+    return nil unless image_magick
+
+    ext = File.extname(file)
+    target = file.sub(/#{Regexp.escape(ext)}\z/i, ".trimmed#{ext}")
+    return target if File.file?(target) && File.mtime(target) >= File.mtime(file)
+
+    command = [
+      image_magick,
+      file,
+      "-background", "none",
+      "-alpha", "on",
+      "-trim",
+      "+repage",
+      "PNG32:#{target}"
+    ]
+    ok = system(*command, out: File::NULL, err: File::NULL)
+    ok && File.file?(target) ? target : nil
   end
 
   def rasterize_svg!(file, size: nil)
@@ -597,7 +687,6 @@ class FFmpegVideoBuilder
 
     <<~SVG
       <svg xmlns="http://www.w3.org/2000/svg" width="#{width}" height="#{height}" viewBox="0 0 #{width} #{height}">
-        <rect width="100%" height="100%" fill="white"/>
         <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Arial, sans-serif" font-size="#{font_size}" font-weight="#{font_weight}" fill="#{color}">
           #{text_lines}
         </g>
@@ -743,10 +832,16 @@ options = {
   kokoro_voice: KokoroTTS::DEFAULT_VOICE,
   kokoro_speed: KokoroTTS::DEFAULT_SPEED,
   kokoro_lang_code: KokoroTTS::DEFAULT_LANG_CODE,
+  tts_engine: NarrationTTS::DEFAULT_ENGINE,
+  google_ai_tts_model: GoogleAITTS::DEFAULT_MODEL,
+  google_ai_tts_voice: GoogleAITTS::DEFAULT_VOICE,
   whisper_model: ENV.fetch("WHISPER_MODEL", OpenAIWhisper::DEFAULT_MODEL),
   whisper_output_format: OpenAIWhisper::DEFAULT_OUTPUT_FORMAT,
   whisper_task: OpenAIWhisper::DEFAULT_TASK,
-  whisper_word_timestamps: OpenAIWhisper::DEFAULT_WORD_TIMESTAMPS
+  whisper_word_timestamps: OpenAIWhisper::DEFAULT_WORD_TIMESTAMPS,
+  facebook_upload_files: [],
+  google_drive_upload_files: [],
+  tiktok_upload_files: []
 }
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: ffmpeg_video_builder [options] path/to/script.txt|path/to/project.json"
@@ -820,6 +915,10 @@ parser = OptionParser.new do |opts|
     options[:kokoro_lang_code] = lang_code
     options[:explicit][:kokoro_lang_code] = true
   end
+  opts.on("--tts-engine ENGINE", NarrationTTS::ENGINES, "Narration TTS engine: kokoro or google_ai; default: kokoro") do |engine|
+    options[:tts_engine] = engine
+    options[:explicit][:tts_engine] = true
+  end
   opts.on("--whisper-transcribe AUDIO_FILE", "Transcribe an audio file with OpenAI Whisper") do |file|
     options[:whisper_audio_file] = file
   end
@@ -845,6 +944,103 @@ parser = OptionParser.new do |opts|
   opts.on("--whisper-prompt PROMPT", "Optional prompt to guide transcription style or vocabulary") do |prompt|
     options[:whisper_prompt] = prompt
     options[:explicit][:whisper_prompt] = true
+  end
+  opts.on("--facebook-upload FILE", "Upload one video file to a Facebook Page. Can be passed multiple times.") do |file|
+    options[:facebook_upload_files] << file
+  end
+  opts.on("--facebook-upload-workspace DIR", "Upload output files listed in DIR/bulk_manifest.json to Facebook") do |dir|
+    options[:facebook_upload_workspace] = dir
+  end
+  opts.on("--facebook-page-id ID", "Facebook Page ID. Defaults to FACEBOOK_PAGE_ID.") do |page_id|
+    options[:facebook_page_id] = page_id
+  end
+  opts.on("--facebook-access-token TOKEN", "Facebook Page access token. Defaults to FACEBOOK_ACCESS_TOKEN.") do |token|
+    options[:facebook_access_token] = token
+  end
+  opts.on("--facebook-title TITLE", "Facebook video title") do |title|
+    options[:facebook_title] = title
+  end
+  opts.on("--facebook-description DESCRIPTION", "Facebook video description") do |description|
+    options[:facebook_description] = description
+  end
+  opts.on("--facebook-unpublished", "Upload Facebook video as unpublished") do
+    options[:facebook_published] = false
+  end
+  opts.on("--google-ai-tts TEXT", "Generate speech audio with Google AI Gemini TTS from inline text") do |text|
+    options[:google_ai_tts_text] = text
+  end
+  opts.on("--google-ai-tts-file FILE", "Generate speech audio with Google AI Gemini TTS from a text file") do |file|
+    options[:google_ai_tts_file] = file
+  end
+  opts.on("--google-ai-tts-output FILE", "Output WAV file for Google AI Gemini TTS") do |file|
+    options[:google_ai_tts_output] = file
+  end
+  opts.on("--google-ai-api-key KEY", "Google AI API key. Defaults to GOOGLE_AI_API_KEY or GEMINI_API_KEY.") do |key|
+    options[:google_ai_api_key] = key
+    options[:explicit][:google_ai_api_key] = true
+  end
+  opts.on("--google-ai-tts-model MODEL", "Google AI Gemini TTS model, default #{GoogleAITTS::DEFAULT_MODEL}") do |model|
+    options[:google_ai_tts_model] = model
+    options[:explicit][:google_ai_tts_model] = true
+  end
+  opts.on("--google-ai-tts-voice VOICE", "Google AI Gemini TTS voice, default #{GoogleAITTS::DEFAULT_VOICE}") do |voice|
+    options[:google_ai_tts_voice] = voice
+    options[:explicit][:google_ai_tts_voice] = true
+  end
+  opts.on("--google-ai-tts-style STYLE", "Natural language speech style instruction for Google AI Gemini TTS") do |style|
+    options[:google_ai_tts_style] = style
+    options[:explicit][:google_ai_tts_style] = true
+  end
+  opts.on("--google-drive-upload FILE", "Upload one file to Google Drive. Can be passed multiple times.") do |file|
+    options[:google_drive_upload_files] << file
+  end
+  opts.on("--google-drive-upload-workspace DIR", "Upload output files listed in DIR/bulk_manifest.json to Google Drive") do |dir|
+    options[:google_drive_upload_workspace] = dir
+  end
+  opts.on("--google-drive-folder-id ID", "Optional Google Drive destination folder ID") do |folder_id|
+    options[:google_drive_folder_id] = folder_id
+  end
+  opts.on("--google-drive-credentials FILE", "Service account JSON credentials. Defaults to GOOGLE_DRIVE_CREDENTIALS or GOOGLE_APPLICATION_CREDENTIALS.") do |file|
+    options[:google_drive_credentials] = file
+  end
+  opts.on("--google-drive-access-token TOKEN", "OAuth access token. Defaults to GOOGLE_DRIVE_ACCESS_TOKEN.") do |token|
+    options[:google_drive_access_token] = token
+  end
+  opts.on("--google-drive-name NAME", "Optional Drive file name when uploading exactly one file") do |name|
+    options[:google_drive_name] = name
+  end
+  opts.on("--tiktok-upload FILE", "Upload one video file to TikTok inbox. Can be passed multiple times.") do |file|
+    options[:tiktok_upload_files] << file
+  end
+  opts.on("--tiktok-upload-workspace DIR", "Upload output files listed in DIR/bulk_manifest.json to TikTok") do |dir|
+    options[:tiktok_upload_workspace] = dir
+  end
+  opts.on("--tiktok-access-token TOKEN", "TikTok user access token. Defaults to TIKTOK_ACCESS_TOKEN.") do |token|
+    options[:tiktok_access_token] = token
+  end
+  opts.on("--tiktok-direct-post", "Use TikTok direct post endpoint instead of inbox upload") do
+    options[:tiktok_direct_post] = true
+  end
+  opts.on("--tiktok-title TITLE", "Caption/title for TikTok direct post") do |title|
+    options[:tiktok_title] = title
+  end
+  opts.on("--tiktok-privacy-level LEVEL", "TikTok direct post privacy level, default SELF_ONLY") do |level|
+    options[:tiktok_privacy_level] = level
+  end
+  opts.on("--tiktok-disable-duet", "Disable Duet for TikTok direct post") do
+    options[:tiktok_disable_duet] = true
+  end
+  opts.on("--tiktok-disable-comment", "Disable comments for TikTok direct post") do
+    options[:tiktok_disable_comment] = true
+  end
+  opts.on("--tiktok-disable-stitch", "Disable Stitch for TikTok direct post") do
+    options[:tiktok_disable_stitch] = true
+  end
+  opts.on("--tiktok-aigc", "Mark TikTok direct post as AI-generated content") do
+    options[:tiktok_is_aigc] = true
+  end
+  opts.on("--tiktok-chunk-size BYTES", Integer, "TikTok file upload chunk size") do |bytes|
+    options[:tiktok_chunk_size] = bytes
   end
   opts.on("-h", "--help", "Show help") do
     puts opts
@@ -910,6 +1106,14 @@ def normalize_background_config(background, base_dir)
   end
 end
 
+def normalize_workspace_path(value, base_dir)
+  return value if value.nil? || value.to_s.strip.empty?
+
+  path = value.to_s
+  expanded = File.expand_path(path, base_dir || Dir.pwd)
+  path.include?(File::SEPARATOR) || File.file?(expanded) ? expanded : path
+end
+
 def workspace_pipeline_options(config, base_dir)
   config = config.transform_keys(&:to_s)
   payload = {}
@@ -942,6 +1146,20 @@ def workspace_pipeline_options(config, base_dir)
     payload[:kokoro_lang_code] = kokoro["lang_code"] if kokoro.key?("lang_code")
   end
 
+  if (tts = config["tts"]).is_a?(Hash)
+    tts = tts.transform_keys(&:to_s)
+    payload[:tts_engine] = tts["engine"] if tts.key?("engine")
+  end
+
+  if (google_ai = config["google_ai_tts"] || config["google_ai"]).is_a?(Hash)
+    google_ai = google_ai.transform_keys(&:to_s)
+    payload[:tts_engine] = "google_ai"
+    payload[:google_ai_api_key] = google_ai["api_key"] if google_ai.key?("api_key")
+    payload[:google_ai_tts_model] = google_ai["model"] if google_ai.key?("model")
+    payload[:google_ai_tts_voice] = google_ai["voice"] if google_ai.key?("voice")
+    payload[:google_ai_tts_style] = google_ai["style"] if google_ai.key?("style")
+  end
+
   if (whisper = config["whisper"]).is_a?(Hash)
     whisper = whisper.transform_keys(&:to_s)
     payload[:whisper_model] = whisper["model"] if whisper.key?("model")
@@ -955,6 +1173,19 @@ def workspace_pipeline_options(config, base_dir)
     pipeline = pipeline.transform_keys(&:to_s)
     payload[:pipeline_waveform] = pipeline["waveform"] if pipeline.key?("waveform")
     payload[:pipeline_icon_width] = pipeline["icon_width"] if pipeline.key?("icon_width")
+    payload[:pipeline_icon_trim_transparency] = pipeline["icon_trim_transparency"] if pipeline.key?("icon_trim_transparency")
+    payload[:pipeline_text_color] = pipeline["text_color"] if pipeline.key?("text_color")
+    payload[:pipeline_category_color] = pipeline["category_color"] if pipeline.key?("category_color")
+    payload[:pipeline_waveform_color] = pipeline["waveform_color"] if pipeline.key?("waveform_color")
+    payload[:pipeline_layout_offset_y] = pipeline["layout_offset_y"] if pipeline.key?("layout_offset_y")
+    payload[:pipeline_icon_y] = pipeline["icon_y"] if pipeline.key?("icon_y")
+    payload[:pipeline_text_y] = pipeline["text_y"] if pipeline.key?("text_y")
+    payload[:pipeline_icon_animation] = pipeline["icon_animation"] if pipeline.key?("icon_animation")
+    payload[:pipeline_sentence_pause] = pipeline["sentence_pause"] if pipeline.key?("sentence_pause")
+    if pipeline.key?("sentence_sound_effect")
+      payload[:pipeline_sentence_sound_effect] = normalize_workspace_path(pipeline["sentence_sound_effect"], base_dir)
+    end
+    payload[:pipeline_sound_effect_volume] = pipeline["sound_effect_volume"] if pipeline.key?("sound_effect_volume")
   end
 
   payload
@@ -970,6 +1201,11 @@ def explicit_pipeline_options(options)
     kokoro_voice: :kokoro_voice,
     kokoro_speed: :kokoro_speed,
     kokoro_lang_code: :kokoro_lang_code,
+    tts_engine: :tts_engine,
+    google_ai_api_key: :google_ai_api_key,
+    google_ai_tts_model: :google_ai_tts_model,
+    google_ai_tts_voice: :google_ai_tts_voice,
+    google_ai_tts_style: :google_ai_tts_style,
     whisper_model: :whisper_model,
     whisper_task: :whisper_task,
     whisper_word_timestamps: :whisper_word_timestamps,
@@ -992,6 +1228,11 @@ def pipeline_options(options, workspace_config: {}, config_base_dir: nil)
     kokoro_voice: options.fetch(:kokoro_voice),
     kokoro_speed: options.fetch(:kokoro_speed),
     kokoro_lang_code: options.fetch(:kokoro_lang_code),
+    tts_engine: options.fetch(:tts_engine),
+    google_ai_api_key: options[:google_ai_api_key],
+    google_ai_tts_model: options.fetch(:google_ai_tts_model),
+    google_ai_tts_voice: options.fetch(:google_ai_tts_voice),
+    google_ai_tts_style: options[:google_ai_tts_style],
     whisper_model: options.fetch(:whisper_model),
     whisper_task: options.fetch(:whisper_task),
     whisper_word_timestamps: options.fetch(:whisper_word_timestamps),
@@ -1010,7 +1251,10 @@ def rebuild_options(options, workspace_config: {}, config_base_dir: nil)
     %i[
       width height fps background
       icon_license_type icon_size
-      pipeline_waveform pipeline_icon_width
+      pipeline_waveform pipeline_icon_width pipeline_icon_trim_transparency
+      pipeline_text_color pipeline_category_color pipeline_waveform_color
+      pipeline_layout_offset_y pipeline_icon_y pipeline_text_y pipeline_icon_animation
+      pipeline_sentence_pause pipeline_sentence_sound_effect pipeline_sound_effect_volume
     ].include?(key)
   end
 end
@@ -1099,6 +1343,109 @@ def render_config_and_move_output(config_path, options)
   FileUtils.mv(source, destination)
 end
 
+def facebook_upload_options(options)
+  {
+    page_id: options[:facebook_page_id],
+    access_token: options[:facebook_access_token],
+    title: options[:facebook_title],
+    description: options[:facebook_description],
+    published: options.fetch(:facebook_published, true)
+  }
+end
+
+def upload_to_facebook_if_requested(options)
+  files = options.fetch(:facebook_upload_files)
+  workspace = options[:facebook_upload_workspace]
+  return false if files.empty? && workspace.nil?
+
+  client = FacebookUpload::Client.new
+  upload_options = facebook_upload_options(options)
+  results = []
+  results.concat(client.upload_manifest(workspace_dir: workspace, **upload_options)) if workspace
+  files.each do |file|
+    results << client.upload(file: file, **upload_options)
+  end
+  puts JSON.pretty_generate(results.map(&:to_h))
+  true
+end
+
+def generate_google_ai_tts_if_requested(options)
+  text = options[:google_ai_tts_text]
+  text_file = options[:google_ai_tts_file]
+  return false if text.nil? && text_file.nil?
+
+  output_file = options[:google_ai_tts_output] || "outputs/google_ai_tts.wav"
+  result = GoogleAITTS.speak(
+    text: text,
+    text_file: text_file,
+    output_file: output_file,
+    api_key: options[:google_ai_api_key],
+    model: options[:google_ai_tts_model] || GoogleAITTS::DEFAULT_MODEL,
+    voice: options[:google_ai_tts_voice] || GoogleAITTS::DEFAULT_VOICE,
+    style: options[:google_ai_tts_style]
+  )
+  puts JSON.pretty_generate(result.to_h)
+  true
+end
+
+def google_drive_upload_options(options)
+  {
+    folder_id: options[:google_drive_folder_id],
+    access_token: options[:google_drive_access_token],
+    credentials_file: options[:google_drive_credentials]
+  }
+end
+
+def upload_to_google_drive_if_requested(options)
+  files = options.fetch(:google_drive_upload_files)
+  workspace = options[:google_drive_upload_workspace]
+  return false if files.empty? && workspace.nil?
+
+  if options[:google_drive_name] && (files.length != 1 || workspace)
+    raise ArgumentError, "--google-drive-name can only be used with exactly one --google-drive-upload file"
+  end
+
+  client = GoogleDriveUpload::Client.new
+  upload_options = google_drive_upload_options(options)
+  results = []
+  results.concat(client.upload_manifest(workspace_dir: workspace, **upload_options)) if workspace
+  files.each do |file|
+    results << client.upload(file: file, name: options[:google_drive_name], **upload_options)
+  end
+  puts JSON.pretty_generate(results.map(&:to_h))
+  true
+end
+
+def tiktok_upload_options(options)
+  {
+    access_token: options[:tiktok_access_token],
+    direct_post: options.fetch(:tiktok_direct_post, false),
+    title: options[:tiktok_title],
+    privacy_level: options[:tiktok_privacy_level] || TikTokUpload::DEFAULT_PRIVACY_LEVEL,
+    disable_duet: options.fetch(:tiktok_disable_duet, false),
+    disable_comment: options.fetch(:tiktok_disable_comment, false),
+    disable_stitch: options.fetch(:tiktok_disable_stitch, false),
+    is_aigc: options[:tiktok_is_aigc],
+    chunk_size: options[:tiktok_chunk_size]
+  }
+end
+
+def upload_to_tiktok_if_requested(options)
+  files = options.fetch(:tiktok_upload_files)
+  workspace = options[:tiktok_upload_workspace]
+  return false if files.empty? && workspace.nil?
+
+  client = TikTokUpload::Client.new
+  upload_options = tiktok_upload_options(options)
+  results = []
+  results.concat(client.upload_manifest(workspace_dir: workspace, **upload_options)) if workspace
+  files.each do |file|
+    results << client.upload(file: file, **upload_options)
+  end
+  puts JSON.pretty_generate(results.map(&:to_h))
+  true
+end
+
 begin
   if options[:icon_search_keyword]
     batch = IconSearch.search_and_download(
@@ -1138,6 +1485,13 @@ begin
     puts JSON.pretty_generate(transcription.to_h)
     exit 0
   end
+
+  exit 0 if generate_google_ai_tts_if_requested(options)
+
+  uploaded = upload_to_facebook_if_requested(options)
+  uploaded = upload_to_google_drive_if_requested(options) || uploaded
+  uploaded = upload_to_tiktok_if_requested(options) || uploaded
+  exit 0 if uploaded
 
   if options[:rebuild_project_dir]
     pipeline = ScriptVideoPipeline.rebuild(

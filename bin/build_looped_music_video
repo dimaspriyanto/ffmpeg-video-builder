@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+input_dir="$(realpath "${1:-workspace/test}")"
+output_file="$(realpath -m "${2:-$input_dir/final_looped_video.mp4}")"
+
+if [[ ! -d "$input_dir" ]]; then
+  printf 'Input directory not found: %s\n' "$input_dir" >&2
+  exit 1
+fi
+
+mapfile -d '' videos < <(
+  find "$input_dir" -maxdepth 1 -type f \
+    \( -iname '*.mp4' -o -iname '*.mov' -o -iname '*.mkv' -o -iname '*.webm' \) \
+    ! -path "$output_file" -print0 | sort -z
+)
+mapfile -d '' audio_files < <(
+  find "$input_dir" -maxdepth 1 -type f \
+    \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' -o -iname '*.ogg' \) \
+    -print0 | sort -z
+)
+
+if (( ${#videos[@]} != 1 )); then
+  printf 'Expected exactly one video file in %s; found %d\n' "$input_dir" "${#videos[@]}" >&2
+  exit 1
+fi
+if (( ${#audio_files[@]} != 1 )); then
+  printf 'Expected exactly one audio file in %s; found %d\n' "$input_dir" "${#audio_files[@]}" >&2
+  exit 1
+fi
+
+video_file="${videos[0]}"
+audio_file="${audio_files[0]}"
+work_dir="$input_dir/.looped-video-work"
+video_bitrate="${VIDEO_BITRATE:-760k}"
+audio_bitrate="${AUDIO_BITRATE:-96k}"
+resized_video="$work_dir/resized-half-${video_bitrate}.mp4"
+mkdir -p "$work_dir"
+
+IFS=, read -r source_width source_height < <(
+  ffprobe -v error -select_streams v:0 \
+    -show_entries stream=width,height -of csv=p=0 "$video_file"
+)
+target_width=$((source_width / 2 / 2 * 2))
+target_height=$((source_height / 2 / 2 * 2))
+
+audio_duration="$(
+  ffprobe -v error -select_streams a:0 -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 "$audio_file"
+)"
+
+if [[ ! -s "$resized_video" || "$video_file" -nt "$resized_video" ]]; then
+  printf 'Resizing %sx%s video to %sx%s...\n' \
+    "$source_width" "$source_height" "$target_width" "$target_height"
+  ffmpeg -hide_banner -loglevel warning -stats -y -i "$video_file" \
+    -map 0:v:0 -an \
+    -vf "scale=${target_width}:${target_height}" \
+    -c:v libx264 -preset veryfast -b:v "$video_bitrate" \
+    -maxrate "$video_bitrate" -bufsize 1520k -pix_fmt yuv420p \
+    -movflags +faststart "$resized_video"
+fi
+
+printf 'Looping resized video to %.3f seconds...\n' "$audio_duration"
+ffmpeg -hide_banner -loglevel warning -stats -y \
+  -stream_loop -1 -i "$resized_video" \
+  -i "$audio_file" \
+  -map 0:v:0 -map 1:a:0 \
+  -t "$audio_duration" \
+  -c:v copy \
+  -c:a aac -b:a "$audio_bitrate" \
+  -movflags +faststart "$output_file"
+
+printf 'Created %s\n' "$output_file"
