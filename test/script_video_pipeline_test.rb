@@ -92,6 +92,32 @@ class ScriptVideoPipelineTest < Minitest::Test
     assert_equal "none", first_icon.fetch("animation")
   end
 
+  def test_first_subtitle_uses_sentence_text_not_title
+    client = ScriptVideoPipeline::Client.new
+    sentences = [{ "index" => 1, "start" => 0.0, "end" => 1.0, "text" => "Kalimat pertama." }]
+    icon_plan = [{
+      "sentence_index" => 1,
+      "sentence" => "Kalimat pertama.",
+      "start" => 0.0,
+      "end" => 1.0,
+      "icon_file" => "/tmp/icon.png"
+    }]
+
+    config = client.send(
+      :build_ffmpeg_config,
+      sentences,
+      icon_plan,
+      "/tmp/audio.wav",
+      "/tmp",
+      { background: { "type" => "color", "color" => "#000000" } },
+      title_text: "Judul Video",
+      category_text: "Kategori"
+    )
+    subtitles = config.fetch("elements").select { |element| element["type"] == "text" && element.key?("paragraph_index") }
+
+    assert_equal ["Kalimat pertama."], subtitles.map { |element| element.fetch("text") }
+  end
+
   def test_icon_plan_animation_is_used_after_first_icon
     client = ScriptVideoPipeline::Client.new
     sentences = [

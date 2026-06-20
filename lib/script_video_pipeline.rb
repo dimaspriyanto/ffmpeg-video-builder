@@ -835,10 +835,6 @@ module ScriptVideoPipeline
         text_end = visual_text_end_time(planned_icon, text_start)
         text = planned_icon.fetch("sentence")
 
-        if planned_icon.fetch("sentence_index") == 1
-          text = title_text.empty? ? text : title_text
-        end
-
         if planned_icon["icon_file"]
           position = visible_icons.index(planned_icon)
           icon_start = icon_index.zero? ? 0.0 : visual_start_time(planned_icon)
