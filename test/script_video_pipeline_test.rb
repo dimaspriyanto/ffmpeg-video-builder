@@ -45,6 +45,44 @@ class ScriptVideoPipelineTest < Minitest::Test
     assert_equal ["Kalimat pertama.", "Kalimat kedua.", "Kalimat ketiga."], sentences
   end
 
+  def test_splits_leading_quote_from_sentence_tail
+    sentences = ScriptVideoPipeline::Client.new.send(
+      :source_sentence_texts,
+      "“Memayu hayuning bawono” berarti manusia hidup untuk menjaga dunia."
+    )
+
+    assert_equal ["“Memayu hayuning bawono”", "berarti manusia hidup untuk menjaga dunia."], sentences
+  end
+
+  def test_content_parser_ignores_bulk_delimiters_and_following_blocks
+    script = <<~SCRIPT
+      Title: Judul Pertama
+      Category: Kategori
+
+      Content:
+      Kalimat pertama.
+      Kalimat kedua.
+
+      ---
+
+      2
+
+      ---
+
+      Title: Judul Kedua
+      Category: Kategori
+
+      Content:
+      Tidak boleh masuk.
+    SCRIPT
+
+    parsed = ScriptVideoPipeline::Client.new.send(:parse_script_text, script, "inline")
+
+    assert_equal "Judul Pertama", parsed.title
+    assert_equal "Kategori", parsed.category
+    assert_equal "Kalimat pertama.\nKalimat kedua.\n", parsed.body
+  end
+
   def test_uses_sequential_icon_set_for_each_bulk_video
     sentences = (1..3).map { |index| { "index" => index } }
     icon_config = {
@@ -62,6 +100,53 @@ class ScriptVideoPipelineTest < Minitest::Test
     )
 
     assert_equal %w[icons/2/1.png icons/2/2.png icons/2/3.png],
+                 expanded.fetch("icons").map { |icon| icon.fetch("file") }
+  end
+
+  def test_can_skip_second_icon_when_first_icon_has_delayed_animation
+    sentences = (1..4).map { |index| { "index" => index } }
+    icon_config = {
+      "icon_sets" => [
+        %w[icons/1/1.png icons/1/2.png icons/1/3.png icons/1/4.png]
+      ]
+    }
+
+    expanded = ScriptVideoPipeline::Client.new.send(
+      :expand_local_icon_pool,
+      icon_config,
+      sentences,
+      {
+        bulk_video_index: 1,
+        pipeline_first_icon_delayed_animation: "blink",
+        pipeline_first_icon_animation_delay: 1.0,
+        pipeline_skip_second_icon_after_first_animation: true
+      }
+    )
+
+    assert_equal %w[icons/1/1.png icons/1/3.png icons/1/4.png icons/1/4.png],
+                 expanded.fetch("icons").map { |icon| icon.fetch("file") }
+  end
+
+  def test_delayed_first_icon_keeps_sequential_icons_by_default
+    sentences = (1..4).map { |index| { "index" => index } }
+    icon_config = {
+      "icon_sets" => [
+        %w[icons/1/1.png icons/1/2.png icons/1/3.png icons/1/4.png]
+      ]
+    }
+
+    expanded = ScriptVideoPipeline::Client.new.send(
+      :expand_local_icon_pool,
+      icon_config,
+      sentences,
+      {
+        bulk_video_index: 1,
+        pipeline_first_icon_delayed_animation: "blink",
+        pipeline_first_icon_animation_delay: 1.0
+      }
+    )
+
+    assert_equal %w[icons/1/1.png icons/1/2.png icons/1/3.png icons/1/4.png],
                  expanded.fetch("icons").map { |icon| icon.fetch("file") }
   end
 
@@ -92,7 +177,104 @@ class ScriptVideoPipelineTest < Minitest::Test
     assert_equal "none", first_icon.fetch("animation")
   end
 
-  def test_first_subtitle_uses_sentence_text_not_title
+  def test_first_icon_can_render_static_then_blink_after_delay
+    client = ScriptVideoPipeline::Client.new
+    sentences = [{ "index" => 1, "start" => 0.0, "end" => 2.0, "text" => "Pembuka." }]
+    icon_plan = [{
+      "sentence_index" => 1,
+      "sentence" => "Pembuka.",
+      "start" => 0.0,
+      "end" => 2.0,
+      "icon_file" => "/tmp/icon.png"
+    }]
+
+    config = client.send(
+      :build_ffmpeg_config,
+      sentences,
+      icon_plan,
+      "/tmp/audio.wav",
+      "/tmp",
+      {
+        background: { "type" => "color", "color" => "#000000" },
+        pipeline_first_icon_delayed_animation: "blink",
+        pipeline_first_icon_animation_delay: 1.0
+      },
+      title_text: "Judul",
+      category_text: "Kategori"
+    )
+    icons = config.fetch("elements").select { |element| element["type"] == "image" }
+
+    assert_equal 3, icons.length
+    assert_equal ["/tmp/icon.png", "/tmp/icon.png", "/tmp/icon.png"], icons.map { |icon| File.expand_path(icon.fetch("file"), "/tmp") }
+    assert_equal [0.0, 1.0, 1.34], icons.map { |icon| icon.fetch("start") }
+    assert_equal [1.0, 1.34, 2.35], icons.map { |icon| icon.fetch("end") }
+    assert_equal ["none", "blink", "none"], icons.map { |icon| icon.fetch("animation") }
+    assert_equal [0, 0, 0], icons.map { |icon| icon.fetch("animation_delay") }
+  end
+
+  def test_first_subtitle_shows_title_for_one_second_then_sentence_text
+    client = ScriptVideoPipeline::Client.new
+    sentences = [{ "index" => 1, "start" => 0.0, "end" => 3.0, "text" => "Kalimat pertama." }]
+    icon_plan = [{
+      "sentence_index" => 1,
+      "sentence" => "Kalimat pertama.",
+      "start" => 0.0,
+      "end" => 3.0,
+      "icon_file" => "/tmp/icon.png"
+    }]
+
+    config = client.send(
+      :build_ffmpeg_config,
+      sentences,
+      icon_plan,
+      "/tmp/audio.wav",
+      "/tmp",
+      { background: { "type" => "color", "color" => "#000000" } },
+      title_text: "Judul Video",
+      category_text: "Kategori"
+    )
+    subtitles = config.fetch("elements").select { |element| element["type"] == "text" && element.key?("paragraph_index") }
+
+    assert_equal ["Judul Video", "Kalimat pertama."], subtitles.map { |element| element.fetch("text") }
+    assert_equal [0.0, 1.034], subtitles.map { |element| element.fetch("start") }
+    assert_equal [1.0, 3.0], subtitles.map { |element| element.fetch("end") }
+  end
+
+  def test_subtitle_ends_at_sentence_audio_end
+    client = ScriptVideoPipeline::Client.new
+    sentences = [
+      { "index" => 1, "start" => 0.0, "end" => 2.0, "text" => "Kalimat pertama cukup panjang." },
+      { "index" => 2, "start" => 4.0, "end" => 5.0, "text" => "Kalimat kedua." }
+    ]
+    icon_plan = sentences.map do |sentence|
+      {
+        "sentence_index" => sentence.fetch("index"),
+        "sentence" => sentence.fetch("text"),
+        "start" => sentence.fetch("start"),
+        "end" => sentence.fetch("end"),
+        "icon_file" => "/tmp/icon-#{sentence.fetch('index')}.png"
+      }
+    end
+
+    config = client.send(
+      :build_ffmpeg_config,
+      sentences,
+      icon_plan,
+      "/tmp/audio.wav",
+      "/tmp",
+      { background: { "type" => "color", "color" => "#000000" } },
+      title_text: "Judul",
+      category_text: "Kategori"
+    )
+    subtitles = config.fetch("elements").select { |element| element["type"] == "text" && element.key?("paragraph_index") }
+
+    assert_equal "Kalimat pertama\ncukup panjang.", subtitles[1].fetch("text")
+    assert_equal 1.034, subtitles[1].fetch("start")
+    assert_equal 2.0, subtitles[1].fetch("end")
+    assert_equal 4.0, subtitles[2].fetch("start")
+  end
+
+  def test_pipeline_font_family_is_applied_to_text_elements
     client = ScriptVideoPipeline::Client.new
     sentences = [{ "index" => 1, "start" => 0.0, "end" => 1.0, "text" => "Kalimat pertama." }]
     icon_plan = [{
@@ -109,13 +291,17 @@ class ScriptVideoPipelineTest < Minitest::Test
       icon_plan,
       "/tmp/audio.wav",
       "/tmp",
-      { background: { "type" => "color", "color" => "#000000" } },
+      {
+        background: { "type" => "color", "color" => "#000000" },
+        pipeline_font_family: "Noto Sans CJK JP"
+      },
       title_text: "Judul Video",
       category_text: "Kategori"
     )
-    subtitles = config.fetch("elements").select { |element| element["type"] == "text" && element.key?("paragraph_index") }
+    text_elements = config.fetch("elements").select { |element| element["type"] == "text" }
 
-    assert_equal ["Kalimat pertama."], subtitles.map { |element| element.fetch("text") }
+    assert_equal "Noto Sans CJK JP", config.fetch("font_family")
+    assert text_elements.all? { |element| element.fetch("font_family") == "Noto Sans CJK JP" }
   end
 
   def test_icon_plan_animation_is_used_after_first_icon
@@ -189,6 +375,47 @@ class ScriptVideoPipelineTest < Minitest::Test
     )
 
     refute config.key?("sound_effects")
+  end
+
+  def test_first_sentence_sound_effect_can_be_replaced_and_delayed
+    client = ScriptVideoPipeline::Client.new
+    sentences = [
+      { "index" => 1, "start" => 0.0, "end" => 1.0, "text" => "Pembuka." },
+      { "index" => 2, "start" => 3.3, "end" => 4.0, "text" => "Isi." }
+    ]
+    icon_plan = sentences.map do |sentence|
+      {
+        "sentence_index" => sentence.fetch("index"),
+        "sentence" => sentence.fetch("text"),
+        "start" => sentence.fetch("start"),
+        "end" => sentence.fetch("end"),
+        "icon_file" => "/tmp/icon-#{sentence.fetch('index')}.png"
+      }
+    end
+
+    config = client.send(
+      :build_ffmpeg_config,
+      sentences,
+      icon_plan,
+      "/tmp/audio.wav",
+      "/tmp",
+      {
+        background: { "type" => "color", "color" => "#000000" },
+        pipeline_sentence_sound_effect: "/tmp/mouse-click.mp3",
+        pipeline_first_sentence_sound_effect: "/tmp/bubble-pop.wav",
+        pipeline_first_sentence_sound_effect_delay: 1.0,
+        pipeline_sound_effect_offset: -0.08,
+        pipeline_first_sentence_sound_effect_offset: -0.05
+      },
+      title_text: "Judul",
+      category_text: "Kategori"
+    )
+    sound_effects = config.fetch("sound_effects")
+
+    assert_equal "bubble-pop.wav", File.basename(sound_effects[0].fetch("file"))
+    assert_equal 0.95, sound_effects[0].fetch("start")
+    assert_equal "mouse-click.mp3", File.basename(sound_effects[1].fetch("file"))
+    assert_equal 3.22, sound_effects[1].fetch("start")
   end
 
   def test_merges_extra_whisper_timing_at_the_shortest_pause

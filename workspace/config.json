@@ -23,7 +23,14 @@
     "category_color": "white",
     "waveform_color": "0xffffff",
     "sentence_pause": 1.5,
+    "first_icon_delayed_animation": "blink",
+    "first_icon_animation_delay": 1.0,
+    "skip_second_icon_after_first_animation": false,
     "sentence_sound_effect": "audio/mouse-click.mp3",
+    "first_sentence_sound_effect": "audio/bubble-pop.wav",
+    "first_sentence_sound_effect_delay": 1.0,
+    "sound_effect_offset": -0.076,
+    "first_sentence_sound_effect_offset": -0.049,
     "sound_effect_volume": 0.55
   },
   "kokoro": {

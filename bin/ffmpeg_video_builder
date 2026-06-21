@@ -166,6 +166,7 @@ class FFmpegVideoBuilder
     height = element.key?("height") ? integer(element.fetch("height")) : nil
     opacity = number(element.fetch("opacity", 1.0))
     animation = element.fetch("animation", "fade")
+    animation_delay = number(element.fetch("animation_delay", 0))
     persist = truthy?(element.fetch("persist", false))
     hold = truthy?(element.fetch("hold", persist))
     remove_background = truthy?(element.fetch("remove_background", image.fetch(:remove_background)))
@@ -178,14 +179,14 @@ class FFmpegVideoBuilder
 
     filter = "[#{@input_index}:v]format=rgba"
     filter += transparent_background_filter if remove_background
-    filter += image_transform_filter(animation, width, start_time, height: height)
+    filter += image_transform_filter(animation, width, start_time, height: height, animation_delay: animation_delay)
     filter += ",colorchannelmixer=aa=#{opacity}" if opacity < 1.0
     filter += image_fade_filter(animation, start_time, end_time, hold: hold, preserve_alpha: preserve_alpha)
     filter += "[#{input_label}]"
     @filters << filter
 
     x = overlay_x(element.fetch("x", "center"), animation, start_time)
-    y = overlay_y(element.fetch("y", "center"), animation, start_time)
+    y = overlay_y(element.fetch("y", "center"), animation, start_time, width: width)
 
     overlay_end_time = persist ? @duration : end_time
     @filters << "[#{@current_video_label}][#{input_label}]overlay=x='#{x}':y='#{y}':enable='between(t,#{start_time},#{overlay_end_time})'[#{output_label}]"
@@ -418,6 +419,8 @@ class FFmpegVideoBuilder
     case animation
     when "none"
       ""
+    when "blink"
+      ""
     when *supported_image_animations
       return "" if preserve_alpha
       return ",fade=t=in:st=#{start_time}:d=0.25:alpha=1" if hold
@@ -434,9 +437,10 @@ class FFmpegVideoBuilder
     end
   end
 
-  def image_transform_filter(animation, width, start_time, height: nil)
+  def image_transform_filter(animation, width, start_time, height: nil, animation_delay: 0)
     transition = 0.45
-    progress = "min(max((t-#{start_time})/#{transition},0),1)"
+    animation_start = start_time + animation_delay
+    progress = "min(max((t-#{animation_start})/#{transition},0),1)"
     if height
       return ",scale=#{width}:#{height}:force_original_aspect_ratio=decrease," \
              "pad=#{width}:#{height}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=rgba"
@@ -451,6 +455,9 @@ class FFmpegVideoBuilder
     when "zoom_blur"
       scale = "#{width}*(1.24-0.24*#{progress})"
       ",scale='#{scale}':-1:eval=frame,format=rgba"
+    when "delayed_zoom"
+      scale = "#{width}*(1+0.14*sin(#{progress}*PI))"
+      ",scale='#{scale}':-1:eval=frame,format=rgba"
     when "bounce"
       scale = "#{width}*(1+0.16*sin(#{progress}*PI))"
       ",scale='#{scale}':-1:eval=frame,format=rgba"
@@ -463,6 +470,17 @@ class FFmpegVideoBuilder
     when "wipe_reveal"
       crop_width = "max(1,iw*#{progress})"
       ",#{base_scale},crop=w='#{crop_width}':h=ih:x=0:y=0"
+    when "blink"
+      shrink_end = (animation_start + 0.10).round(3)
+      grow_end = (animation_start + 0.22).round(3)
+      settle_end = (animation_start + 0.34).round(3)
+      scale = "if(lt(t,#{shrink_end})," \
+              "#{width}*(1-0.06*((t-#{animation_start})/0.10))," \
+              "if(lt(t,#{grow_end})," \
+              "#{width}*(0.94+0.07*((t-#{shrink_end})/0.12))," \
+              "if(lt(t,#{settle_end})," \
+              "#{width}*(1.01-0.01*((t-#{grow_end})/0.12)),#{width})))"
+      ",scale='#{scale}':-1:eval=frame,format=rgba"
     else
       ",#{base_scale}"
     end
@@ -471,7 +489,7 @@ class FFmpegVideoBuilder
   def supported_image_animations
     %w[
       fade slide_left slide_right slide_up slide_down pop drop_in zoom_blur bounce
-      rotate_in wipe_reveal pulse_in
+      rotate_in wipe_reveal pulse_in delayed_zoom blink
     ]
   end
 
@@ -489,7 +507,7 @@ class FFmpegVideoBuilder
     end
   end
 
-  def overlay_y(value, animation, start_time)
+  def overlay_y(value, animation, start_time, width: nil)
     target = position_y(value)
     transition = 0.45
 
@@ -498,6 +516,8 @@ class FFmpegVideoBuilder
       "if(lt(t,#{start_time + transition}), H-((t-#{start_time})/#{transition})*(H-(#{target})), #{target})"
     when "slide_down", "drop_in"
       "if(lt(t,#{start_time + transition}), -h+((t-#{start_time})/#{transition})*(#{target}+h), #{target})"
+    when "blink"
+      "#{target}+#{width}-w"
     else
       target
     end
@@ -664,11 +684,12 @@ class FFmpegVideoBuilder
     lines = element.fetch("text").to_s.split("\n")
     text_align = element.fetch("text_align", "left")
     font_weight = integer(element.fetch("font_weight", ubuntu_environment? && element.key?("paragraph_index") ? 900 : 700))
+    font_family = element["font_family"] || @config["font_family"] || "-apple-system, BlinkMacSystemFont, 'SF Pro Display', Arial, sans-serif"
     height = [line_height * lines.length + 36, line_height + 36].max
     y = ((height - (line_height * lines.length)) / 2.0 + font_size).round
     color = svg_color(element.fetch("color", "black"))
 
-    File.write(path, text_svg(width: width, height: height, lines: lines, y: y, line_height: line_height, font_size: font_size, font_weight: font_weight, color: color, text_align: text_align))
+    File.write(path, text_svg(width: width, height: height, lines: lines, y: y, line_height: line_height, font_size: font_size, font_weight: font_weight, color: color, text_align: text_align, font_family: font_family))
     FileUtils.rm_f(path.sub(/\.svg\z/i, ".png"))
     path
   end
@@ -679,7 +700,7 @@ class FFmpegVideoBuilder
     end
   end
 
-  def text_svg(width:, height:, lines:, y:, line_height:, font_size:, font_weight:, color:, text_align:)
+  def text_svg(width:, height:, lines:, y:, line_height:, font_size:, font_weight:, color:, text_align:, font_family:)
     text_lines = lines.each_with_index.map do |line, offset|
       text_x = svg_text_x(line, width, font_size, text_align)
       %(<text x="#{text_x}" y="#{y + (offset * line_height)}">#{escape_xml(line)}</text>)
@@ -687,7 +708,7 @@ class FFmpegVideoBuilder
 
     <<~SVG
       <svg xmlns="http://www.w3.org/2000/svg" width="#{width}" height="#{height}" viewBox="0 0 #{width} #{height}">
-        <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Arial, sans-serif" font-size="#{font_size}" font-weight="#{font_weight}" fill="#{color}">
+        <g font-family="#{escape_xml(font_family)}" font-size="#{font_size}" font-weight="#{font_weight}" fill="#{color}">
           #{text_lines}
         </g>
       </svg>
@@ -1176,15 +1197,25 @@ def workspace_pipeline_options(config, base_dir)
     payload[:pipeline_icon_trim_transparency] = pipeline["icon_trim_transparency"] if pipeline.key?("icon_trim_transparency")
     payload[:pipeline_text_color] = pipeline["text_color"] if pipeline.key?("text_color")
     payload[:pipeline_category_color] = pipeline["category_color"] if pipeline.key?("category_color")
+    payload[:pipeline_font_family] = pipeline["font_family"] if pipeline.key?("font_family")
     payload[:pipeline_waveform_color] = pipeline["waveform_color"] if pipeline.key?("waveform_color")
     payload[:pipeline_layout_offset_y] = pipeline["layout_offset_y"] if pipeline.key?("layout_offset_y")
     payload[:pipeline_icon_y] = pipeline["icon_y"] if pipeline.key?("icon_y")
     payload[:pipeline_text_y] = pipeline["text_y"] if pipeline.key?("text_y")
     payload[:pipeline_icon_animation] = pipeline["icon_animation"] if pipeline.key?("icon_animation")
+    payload[:pipeline_first_icon_delayed_animation] = pipeline["first_icon_delayed_animation"] if pipeline.key?("first_icon_delayed_animation")
+    payload[:pipeline_first_icon_animation_delay] = pipeline["first_icon_animation_delay"] if pipeline.key?("first_icon_animation_delay")
+    payload[:pipeline_skip_second_icon_after_first_animation] = pipeline["skip_second_icon_after_first_animation"] if pipeline.key?("skip_second_icon_after_first_animation")
     payload[:pipeline_sentence_pause] = pipeline["sentence_pause"] if pipeline.key?("sentence_pause")
     if pipeline.key?("sentence_sound_effect")
       payload[:pipeline_sentence_sound_effect] = normalize_workspace_path(pipeline["sentence_sound_effect"], base_dir)
     end
+    if pipeline.key?("first_sentence_sound_effect")
+      payload[:pipeline_first_sentence_sound_effect] = normalize_workspace_path(pipeline["first_sentence_sound_effect"], base_dir)
+    end
+    payload[:pipeline_first_sentence_sound_effect_delay] = pipeline["first_sentence_sound_effect_delay"] if pipeline.key?("first_sentence_sound_effect_delay")
+    payload[:pipeline_sound_effect_offset] = pipeline["sound_effect_offset"] if pipeline.key?("sound_effect_offset")
+    payload[:pipeline_first_sentence_sound_effect_offset] = pipeline["first_sentence_sound_effect_offset"] if pipeline.key?("first_sentence_sound_effect_offset")
     payload[:pipeline_sound_effect_volume] = pipeline["sound_effect_volume"] if pipeline.key?("sound_effect_volume")
   end
 
@@ -1254,7 +1285,11 @@ def rebuild_options(options, workspace_config: {}, config_base_dir: nil)
       pipeline_waveform pipeline_icon_width pipeline_icon_trim_transparency
       pipeline_text_color pipeline_category_color pipeline_waveform_color
       pipeline_layout_offset_y pipeline_icon_y pipeline_text_y pipeline_icon_animation
-      pipeline_sentence_pause pipeline_sentence_sound_effect pipeline_sound_effect_volume
+      pipeline_first_icon_delayed_animation pipeline_first_icon_animation_delay
+      pipeline_skip_second_icon_after_first_animation
+      pipeline_sentence_pause pipeline_sentence_sound_effect pipeline_first_sentence_sound_effect
+      pipeline_first_sentence_sound_effect_delay pipeline_sound_effect_offset
+      pipeline_first_sentence_sound_effect_offset pipeline_sound_effect_volume
     ].include?(key)
   end
 end

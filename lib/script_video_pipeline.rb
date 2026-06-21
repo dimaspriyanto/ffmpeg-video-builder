@@ -39,9 +39,10 @@ module ScriptVideoPipeline
   DEFAULT_WAVEFORM_OPACITY = 0.72
   DEFAULT_SUBTITLE_WORDS_PER_PARAGRAPH = 12
   DEFAULT_OPENING_TITLE_DURATION = 3.0
+  DEFAULT_FIRST_SUBTITLE_TITLE_DURATION = 1.0
   DEFAULT_ICON_CANDIDATE_LIMIT = 8
   ICON_ANIMATIONS = %w[
-    pop fade slide_left slide_right drop_in zoom_blur bounce rotate_in wipe_reveal pulse_in
+    pop fade slide_left slide_right drop_in zoom_blur bounce rotate_in wipe_reveal pulse_in delayed_zoom blink
   ].freeze
   FALLBACK_ICON_KEYWORDS = %w[
     money wallet bank savings chart calendar document lightbulb idea
@@ -424,12 +425,16 @@ module ScriptVideoPipeline
 
         pool = icon_set.map(&:to_s).reject(&:empty?)
         raise ArgumentError, "Icon set #{video_index} must contain at least one local icon file" if pool.empty?
+        skip_second_icon = options[:pipeline_skip_second_icon_after_first_animation] &&
+                           options[:pipeline_first_icon_delayed_animation].to_s != "" &&
+                           options.fetch(:pipeline_first_icon_animation_delay, 0).to_f.positive?
 
         return {
           "icons" => sentences.each_with_index.map do |sentence, index|
+            pool_index = skip_second_icon && index.positive? ? index + 1 : index
             {
               "sentence_index" => sentence.fetch("index"),
-              "file" => pool[index] || pool.last
+              "file" => pool[pool_index] || pool.last
             }
           end
         }
@@ -554,7 +559,7 @@ module ScriptVideoPipeline
         first_content = normalize_script_header_line(lines[content_index]).sub(/\AContent:\s*/i, "")
         body_lines = []
         body_lines << first_content unless first_content.empty?
-        body_lines.concat(lines[(content_index + 1)..] || [])
+        body_lines.concat(content_body_lines(lines[(content_index + 1)..] || []))
       else
         body_lines = []
         reading_headers = true
@@ -606,6 +611,12 @@ module ScriptVideoPipeline
 
     def normalize_script_header_line(line)
       line.to_s.strip.sub(/\A\*\*/, "").sub(/\*\*\z/, "").strip
+    end
+
+    def content_body_lines(lines)
+      lines.take_while do |line|
+        !normalize_script_header_line(line).match?(/\A-{3,}\z/)
+      end
     end
 
     def normalize_script_body(text, script_file)
@@ -677,8 +688,18 @@ module ScriptVideoPipeline
     def source_sentence_texts(script_body)
       lines = script_body.to_s.lines.map(&:strip).reject(&:empty?)
       lines.flat_map do |line|
-        line.scan(/[^.!?]+[.!?]?/).map(&:strip).reject(&:empty?)
+        line.scan(/[^.!?]+[.!?]?/).map(&:strip).reject(&:empty?).flat_map do |sentence|
+          split_leading_quoted_sentence(sentence)
+        end
       end
+    end
+
+    def split_leading_quoted_sentence(sentence)
+      text = sentence.to_s.strip
+      match = text.match(/\A((?:“[^”]+”|"[^"]+"))\s+(.+)\z/)
+      return [text] unless match
+
+      [match[1].strip, match[2].strip].reject(&:empty?)
     end
 
     def write_subtitle_files(project_dir, sentences)
@@ -818,6 +839,7 @@ module ScriptVideoPipeline
       background = background_config(options)
       text_color = options.fetch(:pipeline_text_color, dark_background?(background) ? "white" : "black")
       category_color = options.fetch(:pipeline_category_color, text_color)
+      font_family = options[:pipeline_font_family].to_s.strip
       waveform_color = options.fetch(:pipeline_waveform_color, dark_background?(background) ? "0xffffff" : "0x111111")
       visible_icons = icon_plan.select { |planned_icon| planned_icon["icon_file"] }
       icon_width = options.fetch(:pipeline_icon_width, dark_background?(background) ? DEFAULT_DARK_BACKGROUND_ICON_WIDTH : DEFAULT_ICON_WIDTH)
@@ -825,7 +847,9 @@ module ScriptVideoPipeline
       icon_y = options.key?(:pipeline_icon_y) ? options.fetch(:pipeline_icon_y).to_f : DEFAULT_ICON_Y + layout_offset_y
       text_y = options.key?(:pipeline_text_y) ? options.fetch(:pipeline_text_y).to_f : DEFAULT_TEXT_Y + layout_offset_y
       forced_icon_animation = options[:pipeline_icon_animation].to_s
-      elements = [watermark_element(duration, category_text, color: category_color)]
+      first_icon_delayed_animation = options[:pipeline_first_icon_delayed_animation].to_s
+      first_icon_animation_delay = options.fetch(:pipeline_first_icon_animation_delay, 0).to_f
+      elements = [watermark_element(duration, category_text, color: category_color, font_family: font_family)]
       if options.fetch(:pipeline_waveform, true)
         elements << waveform_element(duration, audio_file, project_dir, color: waveform_color, anchor_y: icon_y)
       end
@@ -838,38 +862,95 @@ module ScriptVideoPipeline
         if planned_icon["icon_file"]
           position = visible_icons.index(planned_icon)
           icon_start = icon_index.zero? ? 0.0 : visual_start_time(planned_icon)
-          elements << {
-            "type" => "image",
-            "file" => relative_path(planned_icon.fetch("icon_file"), project_dir),
-            "start" => icon_start,
-            "end" => icon_end_time(position, visible_icons, duration),
-            "width" => icon_width,
-            "x" => DEFAULT_ICON_X,
-            "y" => icon_y,
-            "animation" => icon_index.zero? ? "none" : safe_icon_animation(planned_icon, forced: forced_icon_animation),
-            "trim_transparency" => false,
-            "hold" => true
-          }
+          icon_end = icon_end_time(position, visible_icons, duration)
+          icon_file = relative_path(planned_icon.fetch("icon_file"), project_dir)
+          if icon_index.zero? && ICON_ANIMATIONS.include?(first_icon_delayed_animation) && first_icon_animation_delay.positive?
+            split_time = [icon_start + first_icon_animation_delay, icon_end].min.round(3)
+            animation_end = first_icon_delayed_animation == "blink" ? [split_time + 0.34, icon_end].min.round(3) : icon_end
+            elements << {
+              "type" => "image",
+              "file" => icon_file,
+              "start" => icon_start,
+              "end" => split_time,
+              "width" => icon_width,
+              "x" => DEFAULT_ICON_X,
+              "y" => icon_y,
+              "animation" => "none",
+              "animation_delay" => 0,
+              "trim_transparency" => false,
+              "hold" => true
+            }
+            elements << {
+              "type" => "image",
+              "file" => icon_file,
+              "start" => split_time,
+              "end" => animation_end,
+              "width" => icon_width,
+              "x" => DEFAULT_ICON_X,
+              "y" => icon_y,
+              "animation" => first_icon_delayed_animation,
+              "animation_delay" => 0,
+              "trim_transparency" => false,
+              "hold" => true
+            }
+            if animation_end < icon_end
+              elements << {
+                "type" => "image",
+                "file" => icon_file,
+                "start" => animation_end,
+                "end" => icon_end,
+                "width" => icon_width,
+                "x" => DEFAULT_ICON_X,
+                "y" => icon_y,
+                "animation" => "none",
+                "animation_delay" => 0,
+                "trim_transparency" => false,
+                "hold" => true
+              }
+            end
+          else
+            elements << {
+              "type" => "image",
+              "file" => icon_file,
+              "start" => icon_start,
+              "end" => icon_end,
+              "width" => icon_width,
+              "x" => DEFAULT_ICON_X,
+              "y" => icon_y,
+              "animation" => icon_animation_for(
+                planned_icon,
+                icon_index,
+                forced: forced_icon_animation,
+                first_delayed_animation: first_icon_delayed_animation
+              ),
+              "animation_delay" => icon_index.zero? ? first_icon_animation_delay : 0,
+              "trim_transparency" => false,
+              "hold" => true
+            }
+          end
         end
 
-        subtitle_paragraphs(text, text_start, text_end).each do |paragraph|
-          elements << {
-            "type" => "text",
-            "text" => wrap_text(paragraph.fetch("text"), DEFAULT_TEXT_MAX_LINE_LENGTH),
-            "start" => paragraph.fetch("start"),
-            "end" => paragraph.fetch("end"),
-            "paragraph_index" => paragraph.fetch("paragraph_index"),
-            "paragraph_count" => paragraph.fetch("paragraph_count"),
-            "font_size" => DEFAULT_TEXT_FONT_SIZE,
-            "color" => text_color,
-            "x" => "center",
-            "y" => text_y,
-            "text_align" => "left",
-            "box" => false,
-            "fallback_width" => DEFAULT_TEXT_WIDTH,
-            "fallback_canvas_width" => DEFAULT_TEXT_CANVAS_WIDTH,
-            "fallback_rasterize_size" => DEFAULT_TEXT_RASTERIZE_SIZE
-          }
+        subtitle_segments(text, text_start, text_end, planned_icon, title_text).each do |segment|
+          subtitle_paragraphs(segment.fetch("text"), segment.fetch("start"), segment.fetch("end")).each do |paragraph|
+            elements << {
+              "type" => "text",
+              "text" => wrap_text(paragraph.fetch("text"), DEFAULT_TEXT_MAX_LINE_LENGTH),
+              "start" => paragraph.fetch("start"),
+              "end" => paragraph.fetch("end"),
+              "paragraph_index" => paragraph.fetch("paragraph_index"),
+              "paragraph_count" => paragraph.fetch("paragraph_count"),
+              "font_size" => DEFAULT_TEXT_FONT_SIZE,
+              "color" => text_color,
+              "x" => "center",
+              "y" => text_y,
+              "text_align" => "left",
+              "box" => false,
+              "fallback_width" => DEFAULT_TEXT_WIDTH,
+              "fallback_canvas_width" => DEFAULT_TEXT_CANVAS_WIDTH,
+              "fallback_rasterize_size" => DEFAULT_TEXT_RASTERIZE_SIZE
+            }
+            elements.last["font_family"] = font_family unless font_family.empty?
+          end
         end
       end
 
@@ -883,6 +964,7 @@ module ScriptVideoPipeline
         "audio" => relative_path(audio_file, project_dir),
         "elements" => elements
       }
+      config["font_family"] = font_family unless font_family.empty?
       sound_effects = sentence_sound_effects(sentences, project_dir, options)
       config["sound_effects"] = sound_effects unless sound_effects.empty?
       config
@@ -1020,7 +1102,7 @@ module ScriptVideoPipeline
       words.map { |word| word[0].upcase + word[1..].to_s }.join
     end
 
-    def watermark_element(duration, category_text, color: "black")
+    def watermark_element(duration, category_text, color: "black", font_family: nil)
       {
         "type" => "text",
         "text" => watermark_text(category_text),
@@ -1035,7 +1117,9 @@ module ScriptVideoPipeline
         "fallback_width" => DEFAULT_WATERMARK_WIDTH,
         "fallback_canvas_width" => DEFAULT_WATERMARK_CANVAS_WIDTH,
         "fallback_rasterize_size" => DEFAULT_TEXT_RASTERIZE_SIZE
-      }
+      }.tap do |element|
+        element["font_family"] = font_family unless font_family.to_s.strip.empty?
+      end
     end
 
     def watermark_text(category_text)
@@ -1053,6 +1137,14 @@ module ScriptVideoPipeline
       visual_start_time(next_icon)
     end
 
+    def icon_animation_for(planned_icon, icon_index, forced: nil, first_delayed_animation: nil)
+      first_delayed_animation = first_delayed_animation.to_s
+      return first_delayed_animation if icon_index.zero? && ICON_ANIMATIONS.include?(first_delayed_animation)
+      return "none" if icon_index.zero?
+
+      safe_icon_animation(planned_icon, forced: forced)
+    end
+
     def safe_icon_animation(planned_icon, forced: nil)
       forced_animation = forced.to_s
       return forced_animation if ICON_ANIMATIONS.include?(forced_animation)
@@ -1065,13 +1157,25 @@ module ScriptVideoPipeline
 
     def sentence_sound_effects(sentences, project_dir, options)
       sound_effect = options[:pipeline_sentence_sound_effect].to_s
-      return [] if sound_effect.empty?
+      first_sound_effect = options[:pipeline_first_sentence_sound_effect].to_s
+      return [] if sound_effect.empty? && first_sound_effect.empty?
 
       volume = options.fetch(:pipeline_sound_effect_volume, 0.55).to_f
-      sentences.map do |sentence|
+      first_delay = options.fetch(:pipeline_first_sentence_sound_effect_delay, 0).to_f
+      offset = options.fetch(:pipeline_sound_effect_offset, 0).to_f
+      first_offset = options.fetch(:pipeline_first_sentence_sound_effect_offset, offset).to_f
+      sentences.filter_map.with_index do |sentence, index|
+        file = index.zero? && !first_sound_effect.empty? ? first_sound_effect : sound_effect
+        next if file.empty?
+
+        start_time = sentence.fetch("start").to_f
+        start_time += first_delay if index.zero? && !first_sound_effect.empty?
+        start_time += index.zero? && !first_sound_effect.empty? ? first_offset : offset
+        start_time = [start_time, 0.0].max
+
         {
-          "file" => relative_path(sound_effect, project_dir),
-          "start" => sentence.fetch("start"),
+          "file" => relative_path(file, project_dir),
+          "start" => start_time.round(3),
           "volume" => volume
         }
       end
@@ -1115,11 +1219,26 @@ module ScriptVideoPipeline
 
     def visual_text_end_time(planned_icon, visual_start)
       natural_end = planned_icon.fetch("end").to_f
-      if planned_icon.fetch("sentence_index") == 1
-        return [natural_end, DEFAULT_OPENING_TITLE_DURATION].max.round(3)
-      end
+      [natural_end, visual_start + frame_gap].max.round(3)
+    end
 
-      [natural_end, visual_start + 0.5].max.round(3)
+    def subtitle_segments(text, start_time, end_time, planned_icon, title_text)
+      start_time = start_time.to_f
+      end_time = end_time.to_f
+      text = text.to_s
+      title_text = title_text.to_s.strip
+      return [{ "text" => text, "start" => start_time, "end" => end_time }] unless planned_icon.fetch("sentence_index") == 1
+      return [{ "text" => text, "start" => start_time, "end" => end_time }] if title_text.empty?
+
+      title_end = [start_time + DEFAULT_FIRST_SUBTITLE_TITLE_DURATION, end_time].min.round(3)
+      segments = [{ "text" => title_text, "start" => start_time.round(3), "end" => title_end }]
+      text_start = [title_end + frame_gap, end_time].min.round(3)
+      segments << { "text" => text, "start" => text_start, "end" => end_time.round(3) } if end_time > text_start
+      segments
+    end
+
+    def frame_gap
+      0.034
     end
 
     def subtitle_paragraphs(text, start_time, end_time)
