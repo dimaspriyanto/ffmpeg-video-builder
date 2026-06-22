@@ -11,6 +11,7 @@ require_relative "icon_search"
 require_relative "narration_tts"
 require_relative "openai_whisper"
 require_relative "project_directory"
+require_relative "raw_icon_grid_splitter"
 
 module ScriptVideoPipeline
   DEFAULT_DOWNLOADS_ROOT = ProjectDirectory::DEFAULT_ROOT
@@ -35,14 +36,14 @@ module ScriptVideoPipeline
   DEFAULT_TEXT_MAX_LINE_LENGTH = 20
   DEFAULT_WAVEFORM_WIDTH = DEFAULT_ICON_WIDTH
   DEFAULT_WAVEFORM_HEIGHT = 64
-  DEFAULT_WAVEFORM_GAP = 44
+  DEFAULT_WAVEFORM_GAP = 20
   DEFAULT_WAVEFORM_OPACITY = 0.72
   DEFAULT_SUBTITLE_WORDS_PER_PARAGRAPH = 12
   DEFAULT_OPENING_TITLE_DURATION = 3.0
   DEFAULT_FIRST_SUBTITLE_TITLE_DURATION = 1.0
   DEFAULT_ICON_CANDIDATE_LIMIT = 8
   ICON_ANIMATIONS = %w[
-    pop fade slide_left slide_right drop_in zoom_blur bounce rotate_in wipe_reveal pulse_in delayed_zoom blink
+    pop fade slide_left slide_right drop_in zoom_blur bounce rotate_in wipe_reveal pulse_in delayed_zoom blink zoom_out
   ].freeze
   FALLBACK_ICON_KEYWORDS = %w[
     money wallet bank savings chart calendar document lightbulb idea
@@ -106,11 +107,16 @@ module ScriptVideoPipeline
       raise ArgumentError, "No scripts found in bulk script file: #{scripts_file}" if script_contents.empty?
 
       background = options[:background] || detect_workspace_background(workspace_dir)
+      downloads_root = options[:downloads_root] || workspace_project_root(workspace_dir)
+      bulk_start_index = Integer(options.fetch(:bulk_start_index, 1))
+      raise ArgumentError, "bulk_start_index must be 1 or greater" if bulk_start_index < 1
+
       results = script_contents.each_with_index.map do |script_content, index|
+        bulk_video_index = bulk_start_index + index
         prepare_script_content(
           script_content: script_content,
           source_file: scripts_file,
-          options: options.merge(background: background, bulk_video_index: index + 1)
+          options: options.merge(background: background, bulk_video_index: bulk_video_index, downloads_root: downloads_root)
         )
       end
 
@@ -120,6 +126,8 @@ module ScriptVideoPipeline
           "workspace_dir" => workspace_dir,
           "scripts_file" => scripts_file,
           "background" => background,
+          "project_root" => downloads_root,
+          "outputs_dir" => workspace_outputs_dir(workspace_dir),
           "generated_at" => Time.now.iso8601,
           "videos" => results.map(&:to_h)
         }
@@ -158,6 +166,7 @@ module ScriptVideoPipeline
 
       icon_config_file = File.join(project_dir, "icon_config.json")
       icon_config = read_json(icon_config_file, default: {})
+      icon_config = raw_icon_grid_config(source_file, project_dir, sentences, options) || icon_config
       icon_config = expand_local_icon_pool(icon_config, sentences, options)
       write_json(icon_config_file, icon_config) unless icon_config.empty?
       local_icon_sentence_indexes = local_icon_config_by_sentence(icon_config, project_dir).keys
@@ -313,6 +322,14 @@ module ScriptVideoPipeline
 
     def create_project_dir(downloads_root)
       ProjectDirectory.create(root: downloads_root)
+    end
+
+    def workspace_project_root(workspace_dir)
+      File.join("projects", File.basename(File.expand_path(workspace_dir.to_s)))
+    end
+
+    def workspace_outputs_dir(workspace_dir)
+      File.join("outputs", File.basename(File.expand_path(workspace_dir.to_s)))
     end
 
     def copy_source_icon_config(source_file, project_dir)
@@ -472,6 +489,36 @@ module ScriptVideoPipeline
       { "icons" => assignments }
     end
 
+    def raw_icon_grid_config(source_file, project_dir, sentences, options)
+      return nil unless options[:bulk_video_index]
+      return nil if !options[:raw_icon_grid] && File.file?(File.join(project_dir, "icon_config.json"))
+
+      source_dir = File.dirname(File.expand_path(source_file.to_s))
+      video_index = options.fetch(:bulk_video_index).to_i
+      grid_file = File.join(source_dir, "icons", "#{video_index}.png")
+      return nil unless File.file?(grid_file)
+
+      output_dir = File.join(project_dir, "icons", "raw_grid_#{format('%02d', video_index)}")
+      files = RawIconGridSplitter.split(
+        source_file: grid_file,
+        output_dir: output_dir,
+        count: [sentences.length, RawIconGridSplitter::DEFAULT_COUNT].min,
+        border: options.fetch(:raw_icon_grid_border, RawIconGridSplitter::DEFAULT_BORDER),
+        output_size: options.fetch(:icon_size, IconSearch::DEFAULT_SIZE)
+      )
+
+      {
+        "icons" => sentences.each_with_index.map do |sentence, index|
+          {
+            "sentence_index" => sentence.fetch("index"),
+            "file" => files[index] || files.last,
+            "source_name" => "Raw icon grid",
+            "icon_source_name" => "Raw icon grid"
+          }
+        end
+      }
+    end
+
     def apply_local_icon_config(planned_icon, local_icon, project_dir, sentence_index)
       icon_dir = File.join(project_dir, "icons", format("%02d", sentence_index))
       FileUtils.mkdir_p(icon_dir)
@@ -628,6 +675,7 @@ module ScriptVideoPipeline
 
     def synchronize_sentence_texts(sentences, script_body)
       source_sentences = source_sentence_texts(script_body)
+      sentences = merge_leading_quoted_sentence_timing(sentences, source_sentences)
       sentences = merge_excess_sentence_timings(sentences, source_sentences.length)
       sentences = split_missing_sentence_timings(sentences, source_sentences.length)
       if source_sentences.length != sentences.length
@@ -639,6 +687,20 @@ module ScriptVideoPipeline
       sentences.each_with_index.map do |sentence, index|
         sentence.merge("index" => index + 1, "text" => source_sentences.fetch(index))
       end
+    end
+
+    def merge_leading_quoted_sentence_timing(sentences, source_sentences)
+      return sentences unless sentences.length == source_sentences.length + 1
+      return sentences unless source_sentences.first.to_s.lstrip.match?(/\A[“\"]/)
+      return sentences if sentences.length < 2
+
+      first = sentences[0]
+      second = sentences[1]
+      merged = first.merge(
+        "end" => second.fetch("end"),
+        "text" => [first.fetch("text"), second.fetch("text")].join(" ").strip
+      )
+      [merged, *sentences.drop(2)]
     end
 
     def merge_excess_sentence_timings(sentences, target_count)
@@ -688,18 +750,8 @@ module ScriptVideoPipeline
     def source_sentence_texts(script_body)
       lines = script_body.to_s.lines.map(&:strip).reject(&:empty?)
       lines.flat_map do |line|
-        line.scan(/[^.!?]+[.!?]?/).map(&:strip).reject(&:empty?).flat_map do |sentence|
-          split_leading_quoted_sentence(sentence)
-        end
+        line.scan(/[^.!?]+[.!?]?/).map(&:strip).reject(&:empty?)
       end
-    end
-
-    def split_leading_quoted_sentence(sentence)
-      text = sentence.to_s.strip
-      match = text.match(/\A((?:“[^”]+”|"[^"]+"))\s+(.+)\z/)
-      return [text] unless match
-
-      [match[1].strip, match[2].strip].reject(&:empty?)
     end
 
     def write_subtitle_files(project_dir, sentences)
@@ -711,12 +763,18 @@ module ScriptVideoPipeline
 
     def apply_sentence_pause(sentences, audio_file, project_dir, options)
       pause_seconds = options.fetch(:pipeline_sentence_pause, 0).to_f
-      return [sentences, audio_file] unless pause_seconds.positive? && sentences.length > 1
+      opening_silence = options.fetch(:pipeline_opening_silence, 0).to_f
+      return [sentences, audio_file] unless opening_silence.positive? || (pause_seconds.positive? && sentences.length > 1)
 
       output_file = File.join(project_dir, "audio_voiceover_paused.wav")
       filters = []
       labels = []
       trim_padding = options.fetch(:pipeline_sentence_trim_padding, 0.12).to_f
+
+      if opening_silence.positive?
+        filters << "anullsrc=r=22050:cl=mono,atrim=duration=#{opening_silence},asetpts=PTS-STARTPTS[opening]"
+        labels << "opening"
+      end
 
       sentences.each_with_index do |sentence, index|
         segment_label = "s#{index}"
@@ -754,7 +812,7 @@ module ScriptVideoPipeline
       raise "Failed to insert sentence pauses: #{stderr.empty? ? stdout : stderr}" unless status.success?
       raise "Sentence pause audio was not created: #{output_file}" unless File.file?(output_file)
 
-      current_time = 0.0
+      current_time = opening_silence
       paused_sentences = sentences.map.with_index do |sentence, index|
         segment_start = sentence.fetch("start").to_f
         segment_end = sentence.fetch("end").to_f
@@ -843,30 +901,46 @@ module ScriptVideoPipeline
       waveform_color = options.fetch(:pipeline_waveform_color, dark_background?(background) ? "0xffffff" : "0x111111")
       visible_icons = icon_plan.select { |planned_icon| planned_icon["icon_file"] }
       icon_width = options.fetch(:pipeline_icon_width, dark_background?(background) ? DEFAULT_DARK_BACKGROUND_ICON_WIDTH : DEFAULT_ICON_WIDTH)
+      waveform_width = options.fetch(:pipeline_waveform_width, icon_width)
+      waveform_height = options.fetch(:pipeline_waveform_height, DEFAULT_WAVEFORM_HEIGHT)
+      waveform_gap = [options.fetch(:pipeline_waveform_gap, DEFAULT_WAVEFORM_GAP).to_f, 20.0].max
       layout_offset_y = options.fetch(:pipeline_layout_offset_y, 0).to_f
       icon_y = options.key?(:pipeline_icon_y) ? options.fetch(:pipeline_icon_y).to_f : DEFAULT_ICON_Y + layout_offset_y
+      waveform_y = options.key?(:pipeline_waveform_y) ? options.fetch(:pipeline_waveform_y).to_f : icon_y
       text_y = options.key?(:pipeline_text_y) ? options.fetch(:pipeline_text_y).to_f : DEFAULT_TEXT_Y + layout_offset_y
       forced_icon_animation = options[:pipeline_icon_animation].to_s
       first_icon_delayed_animation = options[:pipeline_first_icon_delayed_animation].to_s
       first_icon_animation_delay = options.fetch(:pipeline_first_icon_animation_delay, 0).to_f
+      group_icon_animation = options[:pipeline_group_icon_animation].to_s
+      group_icon_animation_duration = options.fetch(:pipeline_group_icon_animation_duration, 0.34).to_f
       elements = [watermark_element(duration, category_text, color: category_color, font_family: font_family)]
       if options.fetch(:pipeline_waveform, true)
-        elements << waveform_element(duration, audio_file, project_dir, color: waveform_color, anchor_y: icon_y)
+        elements << waveform_element(
+          duration,
+          audio_file,
+          project_dir,
+          intervals: sentences.map { |sentence| sentence.slice("start", "end") },
+          color: waveform_color,
+          anchor_y: waveform_y,
+          width: waveform_width,
+          height: waveform_height,
+          gap: waveform_gap
+        )
       end
 
       icon_plan.each_with_index do |planned_icon, icon_index|
-        text_start = visual_start_time(planned_icon)
+        text_start = subtitle_start_time(planned_icon)
         text_end = visual_text_end_time(planned_icon, text_start)
         text = planned_icon.fetch("sentence")
 
         if planned_icon["icon_file"]
           position = visible_icons.index(planned_icon)
-          icon_start = icon_index.zero? ? 0.0 : visual_start_time(planned_icon)
-          icon_end = icon_end_time(position, visible_icons, duration)
+          icon_start = group_start_time(planned_icon, options)
+          icon_end = icon_end_time(position, visible_icons, duration, options)
           icon_file = relative_path(planned_icon.fetch("icon_file"), project_dir)
           if icon_index.zero? && ICON_ANIMATIONS.include?(first_icon_delayed_animation) && first_icon_animation_delay.positive?
             split_time = [icon_start + first_icon_animation_delay, icon_end].min.round(3)
-            animation_end = first_icon_delayed_animation == "blink" ? [split_time + 0.34, icon_end].min.round(3) : icon_end
+            animation_end = [split_time + delayed_first_icon_animation_duration(first_icon_delayed_animation), icon_end].min.round(3)
             elements << {
               "type" => "image",
               "file" => icon_file,
@@ -908,6 +982,20 @@ module ScriptVideoPipeline
                 "hold" => true
               }
             end
+          elsif icon_index.positive? && ICON_ANIMATIONS.include?(group_icon_animation) && group_icon_animation_duration.positive?
+            elements << {
+              "type" => "image",
+              "file" => icon_file,
+              "start" => icon_start,
+              "end" => icon_end,
+              "width" => icon_width,
+              "x" => DEFAULT_ICON_X,
+              "y" => icon_y,
+              "animation" => group_icon_animation,
+              "animation_delay" => 0,
+              "trim_transparency" => false,
+              "hold" => true
+            }
           else
             elements << {
               "type" => "image",
@@ -1062,25 +1150,28 @@ module ScriptVideoPipeline
       JSON.parse(JSON.generate(value))
     end
 
-    def waveform_element(duration, audio_file, project_dir, color: "0x111111", anchor_y: DEFAULT_ICON_Y)
+    def waveform_element(duration, audio_file, project_dir, start_time: 0, end_time: nil, intervals: nil, color: "0x111111", anchor_y: DEFAULT_ICON_Y, width: DEFAULT_WAVEFORM_WIDTH, height: DEFAULT_WAVEFORM_HEIGHT, gap: DEFAULT_WAVEFORM_GAP)
+      end_time ||= duration
       {
         "type" => "waveform",
         "audio" => relative_path(audio_file, project_dir),
-        "start" => 0,
-        "end" => duration,
-        "width" => DEFAULT_WAVEFORM_WIDTH,
-        "height" => DEFAULT_WAVEFORM_HEIGHT,
+        "start" => start_time.round(3),
+        "end" => end_time.round(3),
+        "width" => width,
+        "height" => height,
         "x" => "center",
         "position" => "bottom",
         "anchor_element_type" => "image",
         "anchor_y" => anchor_y,
-        "gap" => 20,
+        "gap" => gap,
         "color" => color,
         "opacity" => DEFAULT_WAVEFORM_OPACITY,
         "mode" => "cline",
         "scale" => "sqrt",
         "remove_background" => true
-      }
+      }.tap do |element|
+        element["intervals"] = intervals.map { |interval| interval.slice("start", "end") } if intervals
+      end
     end
 
     def output_filename(project_dir, title_text)
@@ -1130,11 +1221,11 @@ module ScriptVideoPipeline
       text.split(/\s+/).join("\n")
     end
 
-    def icon_end_time(position, visible_icons, duration)
+    def icon_end_time(position, visible_icons, duration, options = {})
       next_icon = visible_icons[position + 1]
       return duration unless next_icon
 
-      visual_start_time(next_icon)
+      group_start_time(next_icon, options)
     end
 
     def icon_animation_for(planned_icon, icon_index, forced: nil, first_delayed_animation: nil)
@@ -1145,8 +1236,13 @@ module ScriptVideoPipeline
       safe_icon_animation(planned_icon, forced: forced)
     end
 
+    def delayed_first_icon_animation_duration(animation)
+      animation.to_s == "blink" ? 0.34 : 0.45
+    end
+
     def safe_icon_animation(planned_icon, forced: nil)
       forced_animation = forced.to_s
+      return "none" if forced_animation == "none"
       return forced_animation if ICON_ANIMATIONS.include?(forced_animation)
 
       animation = planned_icon["animation"].to_s
@@ -1168,10 +1264,14 @@ module ScriptVideoPipeline
         file = index.zero? && !first_sound_effect.empty? ? first_sound_effect : sound_effect
         next if file.empty?
 
-        start_time = sentence.fetch("start").to_f
-        start_time += first_delay if index.zero? && !first_sound_effect.empty?
-        start_time += index.zero? && !first_sound_effect.empty? ? first_offset : offset
-        start_time = [start_time, 0.0].max
+        start_time = sentence_sound_effect_start(
+          sentence,
+          index,
+          first_delay: first_delay,
+          first_offset: first_offset,
+          offset: offset,
+          options: options
+        )
 
         {
           "file" => relative_path(file, project_dir),
@@ -1179,6 +1279,22 @@ module ScriptVideoPipeline
           "volume" => volume
         }
       end
+    end
+
+    def sentence_sound_effect_start(sentence, index, first_delay:, first_offset:, offset:, options:)
+      start_time = sentence.fetch("start").to_f
+      if index.zero?
+        if options.key?(:pipeline_first_sentence_sound_effect_lead)
+          start_time -= options.fetch(:pipeline_first_sentence_sound_effect_lead).to_f
+        else
+          start_time += first_delay + first_offset
+        end
+      elsif options.key?(:pipeline_sentence_sound_effect_lead)
+        start_time -= options.fetch(:pipeline_sentence_sound_effect_lead).to_f
+      else
+        start_time += offset
+      end
+      [start_time, 0.0].max.round(3)
     end
 
     def first_matching_icon(keywords:, icon_dir:, options:, used_icon_ids:)
@@ -1210,11 +1326,26 @@ module ScriptVideoPipeline
           .to_s
     end
 
-    def visual_start_time(planned_icon)
+    def subtitle_start_time(planned_icon)
       start = planned_icon.fetch("start").to_f
       return 0.0 if planned_icon.fetch("sentence_index") == 1
 
       [start, DEFAULT_OPENING_TITLE_DURATION].max.round(3)
+    end
+
+    def group_start_time(planned_icon, options = {})
+      return 0.0 if planned_icon.fetch("sentence_index") == 1
+
+      return planned_icon.fetch("start").to_f.round(3) if options[:pipeline_sentence_sound_effect].to_s.empty?
+
+      sentence_sound_effect_start(
+        planned_icon,
+        planned_icon.fetch("sentence_index").to_i - 1,
+        first_delay: 0,
+        first_offset: 0,
+        offset: options.fetch(:pipeline_sound_effect_offset, 0).to_f,
+        options: options
+      )
     end
 
     def visual_text_end_time(planned_icon, visual_start)
@@ -1232,7 +1363,8 @@ module ScriptVideoPipeline
 
       title_end = [start_time + DEFAULT_FIRST_SUBTITLE_TITLE_DURATION, end_time].min.round(3)
       segments = [{ "text" => title_text, "start" => start_time.round(3), "end" => title_end }]
-      text_start = [title_end + frame_gap, end_time].min.round(3)
+      voice_start = planned_icon.fetch("start").to_f
+      text_start = [[title_end + frame_gap, voice_start].max, end_time].min.round(3)
       segments << { "text" => text, "start" => text_start, "end" => end_time.round(3) } if end_time > text_start
       segments
     end

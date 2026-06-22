@@ -16,6 +16,9 @@ require_relative "../lib/openai_whisper"
 require_relative "../lib/facebook_upload"
 require_relative "../lib/google_drive_upload"
 require_relative "../lib/google_ai_tts"
+require_relative "../lib/gemini_icon_generator"
+require_relative "../lib/gemini_image_icon_generator"
+require_relative "../lib/raw_icon_grid_splitter"
 require_relative "../lib/tiktok_upload"
 require_relative "../lib/script_video_pipeline"
 
@@ -303,7 +306,15 @@ class FFmpegVideoBuilder
 
     x = position_x(element.fetch("x", "center"))
     y = waveform_y(element, waveform_width, waveform_height)
-    @filters << "[#{@current_video_label}][#{input_label}]overlay=x='#{x}':y='#{y}':enable='between(t,#{start_time},#{end_time})'[#{output_label}]"
+    intervals = Array(element["intervals"])
+    enable_expression = if intervals.empty?
+                          "between(t,#{start_time},#{end_time})"
+                        else
+                          intervals.map do |interval|
+                            "between(t,#{number(interval.fetch('start'))},#{number(interval.fetch('end'))})"
+                          end.join("+")
+                        end
+    @filters << "[#{@current_video_label}][#{input_label}]overlay=x='#{x}':y='#{y}':enable='#{enable_expression}'[#{output_label}]"
     @current_video_label = output_label
   end
 
@@ -452,6 +463,9 @@ class FFmpegVideoBuilder
     when "pop"
       scale = "#{width}*(0.72+0.28*#{progress})"
       ",scale='#{scale}':-1:eval=frame,format=rgba"
+    when "zoom_out"
+      scale = "#{width}*(1.14-0.14*#{progress})"
+      ",scale='#{scale}':-1:eval=frame,format=rgba"
     when "zoom_blur"
       scale = "#{width}*(1.24-0.24*#{progress})"
       ",scale='#{scale}':-1:eval=frame,format=rgba"
@@ -474,12 +488,13 @@ class FFmpegVideoBuilder
       shrink_end = (animation_start + 0.10).round(3)
       grow_end = (animation_start + 0.22).round(3)
       settle_end = (animation_start + 0.34).round(3)
-      scale = "if(lt(t,#{shrink_end})," \
+      scale = "if(lt(t,#{animation_start}),#{width}," \
+              "if(lt(t,#{shrink_end})," \
               "#{width}*(1-0.06*((t-#{animation_start})/0.10))," \
               "if(lt(t,#{grow_end})," \
               "#{width}*(0.94+0.07*((t-#{shrink_end})/0.12))," \
               "if(lt(t,#{settle_end})," \
-              "#{width}*(1.01-0.01*((t-#{grow_end})/0.12)),#{width})))"
+              "#{width}*(1.01-0.01*((t-#{grow_end})/0.12)),#{width}))))"
       ",scale='#{scale}':-1:eval=frame,format=rgba"
     else
       ",#{base_scale}"
@@ -489,7 +504,7 @@ class FFmpegVideoBuilder
   def supported_image_animations
     %w[
       fade slide_left slide_right slide_up slide_down pop drop_in zoom_blur bounce
-      rotate_in wipe_reveal pulse_in delayed_zoom blink
+      rotate_in wipe_reveal pulse_in delayed_zoom blink zoom_out
     ]
   end
 
@@ -856,6 +871,16 @@ options = {
   tts_engine: NarrationTTS::DEFAULT_ENGINE,
   google_ai_tts_model: GoogleAITTS::DEFAULT_MODEL,
   google_ai_tts_voice: GoogleAITTS::DEFAULT_VOICE,
+  gemini_icons_model: GeminiIconGenerator::DEFAULT_MODEL,
+  gemini_icons_source: GeminiIconGenerator::DEFAULT_SOURCE,
+  gemini_icons_style: GeminiIconGenerator::DEFAULT_STYLE,
+  gemini_icons_output_dir: GeminiIconGenerator::DEFAULT_OUTPUT_DIR,
+  gemini_image_icons_model: GeminiImageIconGenerator::DEFAULT_MODEL,
+  gemini_image_icons_output_dir: GeminiImageIconGenerator::DEFAULT_OUTPUT_DIR,
+  gemini_image_icons_inner_size: GeminiImageIconGenerator::DEFAULT_INNER_SIZE,
+  raw_icon_grid_border: RawIconGridSplitter::DEFAULT_BORDER,
+  raw_icon_grid_count: RawIconGridSplitter::DEFAULT_COUNT,
+  bulk_start_index: 1,
   whisper_model: ENV.fetch("WHISPER_MODEL", OpenAIWhisper::DEFAULT_MODEL),
   whisper_output_format: OpenAIWhisper::DEFAULT_OUTPUT_FORMAT,
   whisper_task: OpenAIWhisper::DEFAULT_TASK,
@@ -905,6 +930,9 @@ parser = OptionParser.new do |opts|
   end
   opts.on("--bulk-scripts FILE", "Bulk script file, default: scripts.txt in the workspace") do |file|
     options[:bulk_scripts_file] = file
+  end
+  opts.on("--bulk-start-index INDEX", Integer, "1-based script/icon index for the first bulk script, default: 1") do |index|
+    options[:bulk_start_index] = index
   end
   opts.on("--background-color COLOR", "Generated video background color, default: #FFC067") do |color|
     options[:background_color] = color
@@ -1011,6 +1039,49 @@ parser = OptionParser.new do |opts|
   opts.on("--google-ai-tts-style STYLE", "Natural language speech style instruction for Google AI Gemini TTS") do |style|
     options[:google_ai_tts_style] = style
     options[:explicit][:google_ai_tts_style] = true
+  end
+  opts.on("--gemini-icons-script FILE", "Ask Gemini to choose Material Symbols icons for a script file") do |file|
+    options[:gemini_icons_script] = file
+  end
+  opts.on("--gemini-icons-output-dir DIR", "Directory for generated icon SVGs and Gemini metadata") do |dir|
+    options[:gemini_icons_output_dir] = dir
+  end
+  opts.on("--gemini-icons-config FILE", "Write generated icon_config.json to this file") do |file|
+    options[:gemini_icons_config] = file
+  end
+  opts.on("--gemini-icons-model MODEL", "Gemini model for icon selection, default #{GeminiIconGenerator::DEFAULT_MODEL}") do |model|
+    options[:gemini_icons_model] = model
+  end
+  opts.on("--gemini-icons-source SOURCE", "Iconify source for resolved icons, default #{GeminiIconGenerator::DEFAULT_SOURCE}") do |source|
+    options[:gemini_icons_source] = source
+  end
+  opts.on("--gemini-icons-style STYLE", "Icon style metadata/search preference, default #{GeminiIconGenerator::DEFAULT_STYLE}") do |style|
+    options[:gemini_icons_style] = style
+  end
+  opts.on("--gemini-image-icons-script FILE", "Generate one Gemini image icon per script sentence") do |file|
+    options[:gemini_image_icons_script] = file
+  end
+  opts.on("--gemini-image-icons-output-dir DIR", "Directory for generated Gemini image icon PNGs") do |dir|
+    options[:gemini_image_icons_output_dir] = dir
+  end
+  opts.on("--gemini-image-icons-config FILE", "Write generated image icon_config.json to this file") do |file|
+    options[:gemini_image_icons_config] = file
+  end
+  opts.on("--gemini-image-icons-model MODEL", "Gemini image generation model, default #{GeminiImageIconGenerator::DEFAULT_MODEL}") do |model|
+    options[:gemini_image_icons_model] = model
+  end
+  opts.on("--gemini-image-icons-inner-size PIXELS", Integer, "Centered icon safe area, default #{GeminiImageIconGenerator::DEFAULT_INNER_SIZE}") do |size|
+    options[:gemini_image_icons_inner_size] = size
+  end
+  opts.on("--split-raw-icon-grid FILE", "Split a 3x3 raw icon grid PNG into sequential PNG icons") do |file|
+    options[:split_raw_icon_grid] = file
+  end
+  opts.on("--split-raw-icon-output-dir DIR", "Output directory for --split-raw-icon-grid") do |dir|
+    options[:split_raw_icon_output_dir] = dir
+  end
+  opts.on("--raw-icon-grid-border PIXELS", Integer, "Border to remove from each raw icon grid cell, default #{RawIconGridSplitter::DEFAULT_BORDER}") do |pixels|
+    options[:raw_icon_grid_border] = pixels
+    options[:explicit][:raw_icon_grid_border] = true
   end
   opts.on("--google-drive-upload FILE", "Upload one file to Google Drive. Can be passed multiple times.") do |file|
     options[:google_drive_upload_files] << file
@@ -1152,6 +1223,8 @@ def workspace_pipeline_options(config, base_dir)
 
   if (icon = config["icon"]).is_a?(Hash)
     icon = icon.transform_keys(&:to_s)
+    payload[:raw_icon_grid] = true if icon["method"].to_s == "raw_grid"
+    payload[:raw_icon_grid_border] = icon["grid_border"] if icon.key?("grid_border")
     payload[:icon_style] = icon["style"] if icon.key?("style")
     payload[:icon_source] = icon["source_url"] if icon.key?("source_url")
     payload[:icon_source] = icon["source"] if icon.key?("source")
@@ -1194,6 +1267,9 @@ def workspace_pipeline_options(config, base_dir)
     pipeline = pipeline.transform_keys(&:to_s)
     payload[:pipeline_waveform] = pipeline["waveform"] if pipeline.key?("waveform")
     payload[:pipeline_icon_width] = pipeline["icon_width"] if pipeline.key?("icon_width")
+    payload[:pipeline_waveform_width] = pipeline["waveform_width"] if pipeline.key?("waveform_width")
+    payload[:pipeline_waveform_height] = pipeline["waveform_height"] if pipeline.key?("waveform_height")
+    payload[:pipeline_waveform_gap] = pipeline["waveform_gap"] if pipeline.key?("waveform_gap")
     payload[:pipeline_icon_trim_transparency] = pipeline["icon_trim_transparency"] if pipeline.key?("icon_trim_transparency")
     payload[:pipeline_text_color] = pipeline["text_color"] if pipeline.key?("text_color")
     payload[:pipeline_category_color] = pipeline["category_color"] if pipeline.key?("category_color")
@@ -1201,11 +1277,15 @@ def workspace_pipeline_options(config, base_dir)
     payload[:pipeline_waveform_color] = pipeline["waveform_color"] if pipeline.key?("waveform_color")
     payload[:pipeline_layout_offset_y] = pipeline["layout_offset_y"] if pipeline.key?("layout_offset_y")
     payload[:pipeline_icon_y] = pipeline["icon_y"] if pipeline.key?("icon_y")
+    payload[:pipeline_waveform_y] = pipeline["waveform_y"] if pipeline.key?("waveform_y")
     payload[:pipeline_text_y] = pipeline["text_y"] if pipeline.key?("text_y")
     payload[:pipeline_icon_animation] = pipeline["icon_animation"] if pipeline.key?("icon_animation")
     payload[:pipeline_first_icon_delayed_animation] = pipeline["first_icon_delayed_animation"] if pipeline.key?("first_icon_delayed_animation")
     payload[:pipeline_first_icon_animation_delay] = pipeline["first_icon_animation_delay"] if pipeline.key?("first_icon_animation_delay")
+    payload[:pipeline_group_icon_animation] = pipeline["group_icon_animation"] if pipeline.key?("group_icon_animation")
+    payload[:pipeline_group_icon_animation_duration] = pipeline["group_icon_animation_duration"] if pipeline.key?("group_icon_animation_duration")
     payload[:pipeline_skip_second_icon_after_first_animation] = pipeline["skip_second_icon_after_first_animation"] if pipeline.key?("skip_second_icon_after_first_animation")
+    payload[:pipeline_opening_silence] = pipeline["opening_silence"] if pipeline.key?("opening_silence")
     payload[:pipeline_sentence_pause] = pipeline["sentence_pause"] if pipeline.key?("sentence_pause")
     if pipeline.key?("sentence_sound_effect")
       payload[:pipeline_sentence_sound_effect] = normalize_workspace_path(pipeline["sentence_sound_effect"], base_dir)
@@ -1214,7 +1294,9 @@ def workspace_pipeline_options(config, base_dir)
       payload[:pipeline_first_sentence_sound_effect] = normalize_workspace_path(pipeline["first_sentence_sound_effect"], base_dir)
     end
     payload[:pipeline_first_sentence_sound_effect_delay] = pipeline["first_sentence_sound_effect_delay"] if pipeline.key?("first_sentence_sound_effect_delay")
+    payload[:pipeline_first_sentence_sound_effect_lead] = pipeline["first_sentence_sound_effect_lead"] if pipeline.key?("first_sentence_sound_effect_lead")
     payload[:pipeline_sound_effect_offset] = pipeline["sound_effect_offset"] if pipeline.key?("sound_effect_offset")
+    payload[:pipeline_sentence_sound_effect_lead] = pipeline["sentence_sound_effect_lead"] if pipeline.key?("sentence_sound_effect_lead")
     payload[:pipeline_first_sentence_sound_effect_offset] = pipeline["first_sentence_sound_effect_offset"] if pipeline.key?("first_sentence_sound_effect_offset")
     payload[:pipeline_sound_effect_volume] = pipeline["sound_effect_volume"] if pipeline.key?("sound_effect_volume")
   end
@@ -1241,7 +1323,8 @@ def explicit_pipeline_options(options)
     whisper_task: :whisper_task,
     whisper_word_timestamps: :whisper_word_timestamps,
     whisper_language: :whisper_language,
-    whisper_prompt: :whisper_prompt
+    whisper_prompt: :whisper_prompt,
+    raw_icon_grid_border: :raw_icon_grid_border
   }
 
   mapping.each_with_object({}) do |(option_key, pipeline_key), payload|
@@ -1268,7 +1351,9 @@ def pipeline_options(options, workspace_config: {}, config_base_dir: nil)
     whisper_task: options.fetch(:whisper_task),
     whisper_word_timestamps: options.fetch(:whisper_word_timestamps),
     whisper_language: options[:whisper_language],
-    whisper_prompt: options[:whisper_prompt]
+    whisper_prompt: options[:whisper_prompt],
+    bulk_start_index: options[:bulk_start_index],
+    raw_icon_grid_border: options[:raw_icon_grid_border]
   }
   payload.merge!(workspace_pipeline_options(workspace_config, config_base_dir)) unless workspace_config.empty?
   payload.merge!(explicit_pipeline_options(options))
@@ -1282,13 +1367,17 @@ def rebuild_options(options, workspace_config: {}, config_base_dir: nil)
     %i[
       width height fps background
       icon_license_type icon_size
-      pipeline_waveform pipeline_icon_width pipeline_icon_trim_transparency
+      pipeline_waveform pipeline_icon_width pipeline_waveform_width pipeline_waveform_height pipeline_waveform_gap
+      pipeline_icon_trim_transparency
       pipeline_text_color pipeline_category_color pipeline_waveform_color
-      pipeline_layout_offset_y pipeline_icon_y pipeline_text_y pipeline_icon_animation
+      pipeline_layout_offset_y pipeline_icon_y pipeline_waveform_y pipeline_text_y pipeline_icon_animation
       pipeline_first_icon_delayed_animation pipeline_first_icon_animation_delay
+      pipeline_group_icon_animation pipeline_group_icon_animation_duration
       pipeline_skip_second_icon_after_first_animation
-      pipeline_sentence_pause pipeline_sentence_sound_effect pipeline_first_sentence_sound_effect
+      pipeline_opening_silence pipeline_sentence_pause pipeline_sentence_sound_effect pipeline_first_sentence_sound_effect
       pipeline_first_sentence_sound_effect_delay pipeline_sound_effect_offset
+      pipeline_first_sentence_sound_effect_lead
+      pipeline_sentence_sound_effect_lead
       pipeline_first_sentence_sound_effect_offset pipeline_sound_effect_volume
     ].include?(key)
   end
@@ -1309,11 +1398,25 @@ rescue JSON::ParserError => e
   raise ArgumentError, "Invalid bulk manifest JSON: #{manifest_file}: #{e.message}"
 end
 
-def render_pipeline_if_requested(pipeline, options)
+def workspace_outputs_dir(workspace_dir)
+  File.join("outputs", File.basename(File.expand_path(workspace_dir.to_s)))
+end
+
+def manifest_outputs_dir(workspace_dir)
+  manifest_file = File.join(File.expand_path(workspace_dir.to_s), "bulk_manifest.json")
+  return workspace_outputs_dir(workspace_dir) unless File.file?(manifest_file)
+
+  manifest = JSON.parse(File.read(manifest_file))
+  manifest["outputs_dir"] || workspace_outputs_dir(workspace_dir)
+rescue JSON::ParserError
+  workspace_outputs_dir(workspace_dir)
+end
+
+def render_pipeline_if_requested(pipeline, options, outputs_dir: "outputs")
   return unless options.fetch(:render)
 
   FFmpegVideoBuilder.call(config_path: pipeline.config_file, dry_run: options[:dry_run])
-  move_rendered_output!(pipeline) unless options[:dry_run]
+  move_rendered_output!(pipeline, outputs_dir: outputs_dir) unless options[:dry_run]
 end
 
 def move_rendered_output!(pipeline, outputs_dir: "outputs")
@@ -1423,6 +1526,59 @@ def generate_google_ai_tts_if_requested(options)
   true
 end
 
+def generate_gemini_icons_if_requested(options)
+  script_file = options[:gemini_icons_script]
+  return false unless script_file
+
+  result = GeminiIconGenerator.generate(
+    script_file: script_file,
+    output_dir: options[:gemini_icons_output_dir],
+    icon_config_file: options[:gemini_icons_config],
+    api_key: options[:google_ai_api_key],
+    model: options[:gemini_icons_model],
+    source: options[:gemini_icons_source],
+    style: options[:gemini_icons_style],
+    size: options[:icon_size]
+  )
+  puts JSON.pretty_generate(result.to_h)
+  true
+end
+
+def generate_gemini_image_icons_if_requested(options)
+  script_file = options[:gemini_image_icons_script]
+  return false unless script_file
+
+  result = GeminiImageIconGenerator.generate(
+    script_file: script_file,
+    output_dir: options[:gemini_image_icons_output_dir],
+    icon_config_file: options[:gemini_image_icons_config],
+    api_key: options[:google_ai_api_key],
+    model: options[:gemini_image_icons_model],
+    size: options[:icon_size],
+    inner_size: options[:gemini_image_icons_inner_size]
+  )
+  puts JSON.pretty_generate(result.to_h)
+  true
+end
+
+def split_raw_icon_grid_if_requested(options)
+  source_file = options[:split_raw_icon_grid]
+  return false unless source_file
+
+  output_dir = options[:split_raw_icon_output_dir]
+  raise ArgumentError, "--split-raw-icon-output-dir is required with --split-raw-icon-grid" if output_dir.to_s.strip.empty?
+
+  files = RawIconGridSplitter.split(
+    source_file: source_file,
+    output_dir: output_dir,
+    count: options[:raw_icon_grid_count],
+    border: options[:raw_icon_grid_border],
+    output_size: options[:icon_size]
+  )
+  puts JSON.pretty_generate({ source_file: File.expand_path(source_file.to_s), output_dir: File.expand_path(output_dir.to_s), files: files })
+  true
+end
+
 def google_drive_upload_options(options)
   {
     folder_id: options[:google_drive_folder_id],
@@ -1522,6 +1678,9 @@ begin
   end
 
   exit 0 if generate_google_ai_tts_if_requested(options)
+  exit 0 if generate_gemini_icons_if_requested(options)
+  exit 0 if generate_gemini_image_icons_if_requested(options)
+  exit 0 if split_raw_icon_grid_if_requested(options)
 
   uploaded = upload_to_facebook_if_requested(options)
   uploaded = upload_to_google_drive_if_requested(options) || uploaded
@@ -1541,6 +1700,7 @@ begin
   if options[:rebuild_workspace_dir]
     workspace_dir = options.fetch(:rebuild_workspace_dir)
     workspace_config = load_workspace_config(workspace_dir)
+    outputs_dir = manifest_outputs_dir(workspace_dir)
     pipelines = bulk_manifest_project_dirs(workspace_dir).map do |project_dir|
       ScriptVideoPipeline.rebuild(
         project_dir: project_dir,
@@ -1549,7 +1709,7 @@ begin
     end
     puts JSON.pretty_generate(pipelines.map(&:to_h))
     pipelines.each do |pipeline|
-      render_pipeline_if_requested(pipeline, options)
+      render_pipeline_if_requested(pipeline, options, outputs_dir: outputs_dir)
     end
     update_bulk_manifest_outputs!(workspace_dir, pipelines) if options.fetch(:render) && !options[:dry_run]
     exit 0
@@ -1563,9 +1723,10 @@ begin
       scripts_file: options[:bulk_scripts_file],
       options: pipeline_options(options, workspace_config: workspace_config, config_base_dir: workspace_dir)
     )
+    outputs_dir = workspace_outputs_dir(workspace_dir)
     puts JSON.pretty_generate(pipelines.map(&:to_h))
     pipelines.each do |pipeline|
-      render_pipeline_if_requested(pipeline, options)
+      render_pipeline_if_requested(pipeline, options, outputs_dir: outputs_dir)
     end
     update_bulk_manifest_outputs!(workspace_dir, pipelines) if options.fetch(:render) && !options[:dry_run]
     exit 0
